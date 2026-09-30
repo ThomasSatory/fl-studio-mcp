@@ -509,7 +509,7 @@ def handle_project_snapshot(params: dict) -> dict:
 
     return {
         "transport": section(handle_transport_get_status),
-        "tempo": section(mixer.getCurrentTempo),
+        "tempo": section(_current_bpm),
         "patterns": section(_snapshot_patterns),
         "channels": section(lambda: handle_channels_get_all()["channels"]),
         "mixer_tracks": section(
@@ -763,9 +763,20 @@ TEMPO_MIN = 10.0
 TEMPO_MAX = 522.0
 
 
+def _current_bpm() -> float:
+    """Project tempo in BPM.
+
+    FL Studio 2025 answers getCurrentTempo() in thousandths of a BPM (130 BPM
+    -> 130000) although the API stubs promise a float BPM. A real tempo never
+    exceeds TEMPO_MAX, so anything above 1000 is thousandths.
+    """
+    raw = mixer.getCurrentTempo()
+    return raw / 1000.0 if raw > 1000 else float(raw)
+
+
 def handle_transport_get_tempo() -> dict:
     """Current project tempo in BPM."""
-    return {"tempo": mixer.getCurrentTempo()}
+    return {"tempo": _current_bpm()}
 
 
 def handle_transport_set_tempo(params: dict) -> dict:
@@ -783,7 +794,7 @@ def handle_transport_set_tempo(params: dict) -> dict:
         int(round(bpm * 1000)),
         midi.REC_Control | midi.REC_UpdateValue | midi.REC_UpdateControl,
     )
-    current = mixer.getCurrentTempo()
+    current = _current_bpm()
     return {"requested": bpm, "tempo": current, "applied": abs(current - bpm) < 0.01}
 
 

@@ -282,3 +282,23 @@ def test_plugin_calls_pass_the_index_mode_by_keyword(fl, action, params, target)
             assert call.args == target and call.kwargs == {"useGlobalIndex": True}, (name, call)
     for call in plugins.getParamValueString.call_args_list:
         assert call.args == (0, *target) and call.kwargs == {"useGlobalIndex": True}, call
+
+
+# FL Studio 2025 answers getCurrentTempo() in thousandths of a BPM (130 BPM ->
+# 130000), unlike the API stubs; older versions answer the BPM as a float.
+@pytest.mark.parametrize("raw", [130000, 130.0])
+def test_tempo_is_reported_in_bpm_whatever_fl_returns(fl, raw):
+    controller, modules = fl
+    modules["mixer"].getCurrentTempo.return_value = raw
+
+    assert controller.dispatch_command("transport.getTempo", {}) == {"tempo": 130.0}
+    assert controller.dispatch_command("project.snapshot", {})["tempo"] == 130.0
+
+
+def test_set_tempo_reads_back_thousandths_as_applied(fl):
+    controller, modules = fl
+    modules["mixer"].getCurrentTempo.return_value = 128000
+
+    result = controller.dispatch_command("transport.setTempo", {"bpm": 128})
+
+    assert result == {"requested": 128.0, "tempo": 128.0, "applied": True}
