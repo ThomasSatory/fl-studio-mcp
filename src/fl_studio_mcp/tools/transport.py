@@ -11,6 +11,10 @@ from fl_studio_mcp.utils.errors import run
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
+# FL Studio's tempo limits in BPM.
+TEMPO_MIN = 10.0
+TEMPO_MAX = 522.0
+
 
 def register_transport_tools(mcp: FastMCP) -> None:
     """Register transport control tools with the MCP server."""
@@ -128,3 +132,27 @@ def register_transport_tools(mcp: FastMCP) -> None:
         run(get_connection(), "transport.setPlaybackSpeed", {"speed": speed})
 
         return f"Playback speed set to {speed}x"
+
+    @mcp.tool()
+    def fl_get_tempo() -> dict:
+        """Get the project tempo in BPM."""
+        result = run(get_connection(), "transport.getTempo")
+        return {"tempo": result.get("tempo")}
+
+    @mcp.tool()
+    def fl_set_tempo(bpm: float) -> dict:
+        """Set the project tempo in BPM (10 to 522).
+
+        FL Studio only exposes tempo through an automation event, so the value
+        is read back afterwards; the call fails if FL Studio did not apply it.
+        """
+        if isinstance(bpm, bool) or not isinstance(bpm, (int, float)):
+            raise ToolError(f"Tempo must be a number between 10 and 522 BPM, got {bpm!r}")
+        if not TEMPO_MIN <= bpm <= TEMPO_MAX:
+            raise ToolError(f"Tempo must be between 10 and 522 BPM, got {bpm!r}")
+        result = run(get_connection(), "transport.setTempo", {"bpm": float(bpm)})
+        if not result.get("applied"):
+            raise ToolError(
+                f"Requested tempo {bpm:g} BPM but FL Studio reports {result.get('tempo')} BPM"
+            )
+        return {"tempo": result.get("tempo")}

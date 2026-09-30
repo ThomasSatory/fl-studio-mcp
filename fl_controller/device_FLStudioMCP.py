@@ -506,6 +506,10 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_transport_set_loop_mode(params)
     elif action == "transport.setPlaybackSpeed":
         return handle_transport_set_playback_speed(params)
+    elif action == "transport.getTempo":
+        return handle_transport_get_tempo()
+    elif action == "transport.setTempo":
+        return handle_transport_set_tempo(params)
 
     # Mixer commands
     elif action == "mixer.getTrackCount":
@@ -699,6 +703,34 @@ def handle_transport_set_playback_speed(params: dict) -> dict:
     speed = params.get("speed", 1.0)
     transport.setPlaybackSpeed(speed)
     return {"speed": speed}
+
+
+TEMPO_MIN = 10.0
+TEMPO_MAX = 522.0
+
+
+def handle_transport_get_tempo() -> dict:
+    """Current project tempo in BPM."""
+    return {"tempo": mixer.getCurrentTempo()}
+
+
+def handle_transport_set_tempo(params: dict) -> dict:
+    """Set the project tempo through the REC event (the only scripting route).
+
+    processRECEvent is documented as fragile, so the tempo is read back and
+    `applied` tells the caller whether FL Studio really took the value.
+    """
+    bpm = float(params.get("bpm", 0))
+    if not TEMPO_MIN <= bpm <= TEMPO_MAX:
+        return {"error": "Tempo %g out of range (%g..%g BPM)" % (bpm, TEMPO_MIN, TEMPO_MAX)}
+    general = _general_mod()
+    general.processRECEvent(
+        midi.REC_Tempo,
+        int(round(bpm * 1000)),
+        midi.REC_Control | midi.REC_UpdateValue | midi.REC_UpdateControl,
+    )
+    current = mixer.getCurrentTempo()
+    return {"requested": bpm, "tempo": current, "applied": abs(current - bpm) < 0.01}
 
 
 # =============================================================================
