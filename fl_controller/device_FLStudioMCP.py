@@ -86,26 +86,24 @@ def OnIdle():
 
 
 def execute_pending_command():
-    """Read command from JSON file, execute it, and write response."""
-    response = {"success": False, "error": None}
+    """Read command from JSON file, execute it, and write response tagged with its id."""
+    response = {"id": None, "success": False, "error": None}
 
     try:
-        # Read command file
         if not COMMAND_FILE.exists():
             response["error"] = "No command file found"
             write_response(response)
             return
 
-        command_text = COMMAND_FILE.read_text()
-        command = json.loads(command_text)
+        command = json.loads(COMMAND_FILE.read_text())
+        response["id"] = command.get("id")
 
         action = command.get("action", "")
         params = command.get("params", {})
 
-        # Execute command and get result
         result = dispatch_command(action, params)
         # A handler that returns {"error": ...} has failed; do not mark it a success.
-        response = {"success": not result.get("error"), **result}
+        response = {"id": command.get("id"), "success": not result.get("error"), **result}
 
     except json.JSONDecodeError as e:
         response["error"] = f"Invalid JSON in command file: {e}"
@@ -470,9 +468,20 @@ def handle_general_get_undo_status(params: dict) -> dict:
 
 
 def write_response(response: dict):
-    """Write response to JSON file."""
+    """Write the response file in place.
+
+    Never via a temp file + os.replace: in FL Studio 2026 os.replace returns
+    NULL without setting an exception and leaves the embedded interpreter
+    failing every later call. Serialise first so a bad value cannot truncate
+    the file; the server only accepts a response carrying its own request id.
+    """
     try:
-        RESPONSE_FILE.write_text(json.dumps(response, indent=2))
+        text = json.dumps(response, indent=2)
+    except Exception as e:
+        print(f"Error serialising response: {e}")
+        return
+    try:
+        RESPONSE_FILE.write_text(text)
     except Exception as e:
         print(f"Error writing response: {e}")
 

@@ -16,11 +16,19 @@ from __future__ import annotations
 import json
 import os
 import platform
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 MIDI_PORT_ENV = "FL_STUDIO_MCP_MIDI_PORT"
+
+OUTDATED_CONTROLLER_HINT = (
+    "FL Studio answered without a request id: the FLStudioMCP controller script "
+    "installed in FL Studio is outdated. Reinstall fl_controller/device_FLStudioMCP.py "
+    "(run install.sh or scripts/setup.sh) and restart FL Studio."
+)
 
 # Substrings identifying virtual (software) MIDI ports, in order of preference.
 PORT_HINTS = ("IAC", "loopMIDI", "Midi Through")
@@ -119,6 +127,8 @@ class MIDIConnection:
         self._port_name: str | None = None
         self._connected = False
         self._error: str | None = None
+        # One command at a time: FastMCP runs synchronous tools in a thread pool.
+        self._lock = threading.Lock()
 
         # File paths for JSON communication
         self._hardware_dir = _get_fl_hardware_dir()
@@ -199,7 +209,10 @@ class MIDIConnection:
         params: dict[str, Any] | None = None,
         timeout: float = 2.0,
     ) -> dict[str, Any]:
-        """Send a command to FL Studio and wait for response.
+        """Send a command to FL Studio and wait for its response.
+
+        One command at a time: the whole write / trigger / wait cycle runs
+        under a lock because FastMCP runs synchronous tools in a thread pool.
 
         Args:
             action: The command action (e.g., "transport.start", "mixer.setTrackVolume")
@@ -210,76 +223,87 @@ class MIDIConnection:
             Response dictionary from FL Studio
 
         Raises:
-            RuntimeError: If not connected or command fails
+            RuntimeError: If no MIDI connection can be established
         """
+        with self._lock:
+            return self._send_command_locked(action, params, timeout)
+
+    def _send_command_locked(
+        self, action: str, params: dict[str, Any] | None, timeout: float
+    ) -> dict[str, Any]:
         self.ensure_connected()
 
-        # Prepare command
-        command = {
-            "action": action,
-            "params": params or {},
-        }
-
-        # Write command to file
+        request_id = uuid.uuid4().hex
+        command = {"id": request_id, "action": action, "params": params or {}}
         try:
-            self._command_file.write_text(json.dumps(command, indent=2))
+            self._write_command(command)
         except Exception as e:
             return {"success": False, "error": f"Failed to write command file: {e}"}
 
-        # Clear old response file
-        if self._response_file.exists():
-            try:
-                self._response_file.unlink()
-            except Exception:
-                pass
+        self._discard_response_file()
 
-        # Send MIDI trigger
         try:
             import mido
-            trigger_msg = mido.Message("note_on", note=self.TRIGGER_NOTE, velocity=127)
-            self._port.send(trigger_msg)
+
+            self._port.send(mido.Message("note_on", note=self.TRIGGER_NOTE, velocity=127))
         except Exception as e:
             return {"success": False, "error": f"Failed to send MIDI trigger: {e}"}
 
-        # Wait for response
-        return self._wait_for_response(timeout)
+        return self._wait_for_response(request_id, timeout)
 
-    def _wait_for_response(self, timeout: float) -> dict[str, Any]:
-        """Wait for response file to appear and read it.
+    def _write_command(self, command: dict[str, Any]) -> None:
+        """Write the command file atomically (temp file + replace, retried on Windows)."""
+        text = json.dumps(command, indent=2)
+        tmp_file = self._command_file.with_name(self._command_file.name + ".tmp")
+        tmp_file.write_text(text)
+        for attempt in range(5):
+            try:
+                os.replace(tmp_file, self._command_file)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)
 
-        Args:
-            timeout: Maximum time to wait in seconds
+    def _discard_response_file(self) -> None:
+        try:
+            self._response_file.unlink()
+        except OSError:
+            pass
 
-        Returns:
-            Response dictionary or error dict if timeout
+    def _wait_for_response(self, request_id: str, timeout: float) -> dict[str, Any]:
+        """Wait for the response carrying `request_id`.
+
+        Responses with another id (a late answer to a timed-out command) are
+        discarded. A response without any id comes from an outdated controller
+        script; it is discarded too and reported at the deadline. Unparseable
+        JSON means FL Studio is still writing: keep polling.
         """
         start_time = time.time()
         poll_interval = 0.02  # 20ms between checks
-
         last_error: str | None = None
+        saw_legacy_response = False
+
         while time.time() - start_time < timeout:
             if self._response_file.exists():
                 try:
-                    response_text = self._response_file.read_text()
-                    response = json.loads(response_text)
+                    response = json.loads(self._response_file.read_text())
                 except (json.JSONDecodeError, OSError) as e:
-                    # The controller is most likely still writing the file
-                    # (FL's interpreter cannot rename atomically); poll again
-                    # instead of failing on a half-written response.
                     last_error = f"{type(e).__name__}: {e}"
                     time.sleep(poll_interval)
                     continue
 
-                # Clean up response file
-                try:
-                    self._response_file.unlink()
-                except Exception:
-                    pass
-
-                return response
+                if isinstance(response, dict) and response.get("id") == request_id:
+                    self._discard_response_file()
+                    return response
+                if not isinstance(response, dict) or "id" not in response:
+                    saw_legacy_response = True
+                self._discard_response_file()
 
             time.sleep(poll_interval)
 
+        if saw_legacy_response:
+            return {"success": False, "error": OUTDATED_CONTROLLER_HINT}
         if last_error:
             return {
                 "success": False,
