@@ -837,7 +837,7 @@ def handle_mixer_get_all_tracks(params: dict) -> dict:
             "is_solo": mixer.isTrackSolo(i) == 1,
         })
 
-    return {"tracks": tracks}
+    return {"track_count": track_count, "tracks": tracks}
 
 
 def handle_mixer_set_track_volume(params: dict) -> dict:
@@ -969,7 +969,10 @@ def handle_channels_get_all() -> dict:
         channels_list.append({
             "index": i,
             "name": channels.getChannelName(i, True),
+            "volume": channels.getChannelVolume(i, True),
+            "pan": channels.getChannelPan(i, True),
             "is_muted": channels.isChannelMuted(i, True) == 1,
+            "is_solo": channels.isChannelSolo(i, True) == 1,
             "is_selected": channels.isChannelSelected(i, True) == 1,
             "target_fx_track": channels.getTargetFxTrack(i, True),
         })
@@ -1208,41 +1211,48 @@ def handle_plugins_get_param_count(params: dict) -> dict:
     return {"count": count}
 
 
-def handle_plugins_get_params(params: dict) -> dict:
-    """Get all plugin parameters."""
+def _plugin_target(params: dict) -> tuple:
+    """(index, slot_index, use_global) as the plugins module expects them.
+
+    A mixer effect slot always uses global indexing; a channel rack plugin
+    (slot_index -1) honours use_global.
+    """
     index = params.get("index", 0)
     slot_index = params.get("slot_index", -1)
-    use_global = params.get("use_global", True)
+    if slot_index >= 0:
+        return index, slot_index, True
+    return index, -1, params.get("use_global", True)
+
+
+def handle_plugins_get_params(params: dict) -> dict:
+    """Plugin identity plus its parameters; an empty location is not an error."""
+    index, slot_index, use_global = _plugin_target(params)
     max_params = params.get("max_params", 50)
 
-    if slot_index >= 0:
-        param_count = plugins.getParamCount(index, slot_index, True)
-    else:
-        param_count = plugins.getParamCount(index, -1, use_global)
+    if not plugins.isValid(index, slot_index, use_global):
+        return {"valid": False, "params": []}
 
+    param_count = plugins.getParamCount(index, slot_index, use_global)
     param_list = []
     for i in range(min(param_count, max_params)):
         try:
-            if slot_index >= 0:
-                name = plugins.getParamName(i, index, slot_index, True)
-                value = plugins.getParamValue(i, index, slot_index, True)
-                value_str = plugins.getParamValueString(i, index, slot_index, True)
-            else:
-                name = plugins.getParamName(i, index, -1, use_global)
-                value = plugins.getParamValue(i, index, -1, use_global)
-                value_str = plugins.getParamValueString(i, index, -1, use_global)
-
             param_list.append({
                 "index": i,
-                "name": name,
-                "value": value,
-                "value_string": value_str,
+                "name": plugins.getParamName(i, index, slot_index, use_global),
+                "value": plugins.getParamValue(i, index, slot_index, use_global),
+                "value_string": plugins.getParamValueString(i, index, slot_index, use_global),
             })
         except Exception as e:
             print(f"Warning: could not read param {i}: {e}")
-            continue
 
-    return {"params": param_list}
+    return {
+        "valid": True,
+        "name": plugins.getPluginName(index, slot_index, use_global),
+        "param_count": param_count,
+        "preset_count": plugins.getPresetCount(index, slot_index, use_global),
+        "color": hex(plugins.getColor(index, slot_index, use_global)),
+        "params": param_list,
+    }
 
 
 def handle_plugins_get_param_value(params: dict) -> dict:

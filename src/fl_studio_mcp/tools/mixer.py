@@ -17,16 +17,6 @@ def register_mixer_tools(mcp: FastMCP) -> None:
     from fl_studio_mcp.utils.connection import get_connection
 
     @mcp.tool()
-    def fl_get_mixer_track_count() -> int:
-        """Get the total number of mixer tracks available.
-
-        FL Studio typically has 125 mixer tracks (0-124), where track 0 is the Master.
-        """
-        result = run(get_connection(), "mixer.getTrackCount")
-
-        return result.get("count", 0)
-
-    @mcp.tool()
     def fl_get_mixer_track_info(track: int) -> dict:
         """Get detailed information about a specific mixer track.
 
@@ -49,16 +39,19 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         }
 
     @mcp.tool()
-    def fl_get_all_mixer_tracks(include_empty: bool = False) -> list[dict]:
-        """Get information about all mixer tracks.
+    def fl_get_all_mixer_tracks(include_empty: bool = False) -> dict:
+        """List mixer tracks.
+
+        Returns {"track_count": total tracks in the mixer (Master is 0),
+        "tracks": [{index, name, volume, pan, is_muted, is_solo}]}.
 
         Args:
-            include_empty: If False, only returns tracks with non-default names.
-                          If True, returns all 125 tracks.
+            include_empty: False (default) lists Master and named tracks only;
+                           True lists every track.
         """
         result = run(get_connection(), "mixer.getAllTracks", {"include_empty": include_empty})
 
-        return result.get("tracks", [])
+        return {"track_count": result.get("track_count"), "tracks": result.get("tracks", [])}
 
     @mcp.tool()
     def fl_set_track_volume(track: int, volume: float) -> str:

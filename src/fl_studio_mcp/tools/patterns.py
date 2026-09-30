@@ -41,13 +41,9 @@ def register_pattern_tools(mcp: FastMCP) -> None:
 
         Returns each pattern's index (1-based), name, color, length in beats
         and selection state, plus the currently active pattern.
+        `current` is the index of the active pattern.
         """
         return run(get_connection(), "patterns.getAll", {"include_default": include_default})
-
-    @mcp.tool()
-    def fl_get_current_pattern() -> dict:
-        """Get the currently active pattern (index, name, length in beats)."""
-        return run(get_connection(), "patterns.getCurrent")
 
     @mcp.tool()
     def fl_select_pattern(index: int) -> str:

@@ -19,7 +19,6 @@ Limitations:
 from __future__ import annotations
 
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp import __version__
 from fl_studio_mcp.tools import (
@@ -99,34 +98,15 @@ def get_project_info() -> dict:
 
 # Connection management tools
 @mcp.tool()
-def fl_connect() -> str:
-    """Connect or reconnect to FL Studio via MIDI.
+def fl_connection_status(reconnect: bool = False) -> dict:
+    """Get the FL Studio MIDI connection status.
 
-    Use this tool to:
-    - Check if FL Studio is connected
-    - Retry connection after starting FL Studio
-    - Reconnect if the connection was lost
-
-    Returns the connection status.
+    Args:
+        reconnect: drop the current connection and connect again first - use
+                   after starting FL Studio or when commands stopped arriving.
     """
-    # Reset connection state to force a fresh connection attempt
-    reset_connection()
-
-    conn = get_connection()
-    try:
-        conn.ensure_connected()
-    except RuntimeError as e:
-        raise ToolError(f"Connection failed: {e}") from e
-    return "Successfully connected to FL Studio via MIDI!"
-
-
-@mcp.tool()
-def fl_connection_status() -> dict:
-    """Get the current FL Studio connection status.
-
-    Returns information about whether FL Studio is connected
-    and any error messages if not.
-    """
+    if reconnect:
+        reset_connection()
     conn = get_connection()
     # Eagerly attempt a connection so the reported status reflects actual
     # reachability rather than the lazily-initialized flag.

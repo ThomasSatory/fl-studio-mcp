@@ -92,6 +92,9 @@ def make_fl_modules() -> dict[str, MagicMock]:
     channels.isChannelMuted.return_value = 0
     channels.isChannelSelected.return_value = 0
     channels.getTargetFxTrack.return_value = 1
+    channels.getChannelVolume.return_value = 0.78
+    channels.getChannelPan.return_value = 0.0
+    channels.isChannelSolo.return_value = 0
 
     patterns = mods["patterns"]
     patterns.patternNumber.return_value = 1

@@ -76,9 +76,9 @@ def test_string_returning_tool_raises(tools):
         tools["fl_stop"]()
 
 
-def test_int_returning_tool_raises_instead_of_minus_one(tools):
-    with pytest.raises(ToolError, match="boom on channels.getCount"):
-        tools["fl_get_channel_count"]()
+def test_list_returning_tool_raises_instead_of_empty_list(tools):
+    with pytest.raises(ToolError, match="boom on channels.getAll"):
+        tools["fl_get_all_channels"]()
 
 
 def test_dict_returning_tool_raises(tools):

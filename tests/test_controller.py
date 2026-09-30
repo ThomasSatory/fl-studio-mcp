@@ -167,3 +167,54 @@ def test_duplicate_trigger_for_same_id_is_ignored(fl):
 
     assert modules["transport"].start.call_count == 2
     assert json.loads(controller.RESPONSE_FILE.read_text())["id"] == "req8"
+
+
+def test_channels_get_all_includes_mix_fields(fl):
+    controller, _ = fl
+
+    (kick, _bass) = controller.dispatch_command("channels.getAll", {})["channels"]
+
+    assert kick == {"index": 0, "name": "Kick", "volume": 0.78, "pan": 0.0,
+                    "is_muted": False, "is_solo": False, "is_selected": False,
+                    "target_fx_track": 1}
+
+
+def test_mixer_get_all_tracks_reports_total_count(fl):
+    controller, _ = fl
+
+    result = controller.dispatch_command("mixer.getAllTracks", {"include_empty": False})
+
+    assert result["track_count"] == 3
+    assert [t["name"] for t in result["tracks"]] == ["Master", "Drums"]
+
+
+def test_plugins_get_params_bundles_plugin_info(fl):
+    controller, modules = fl
+    plugins = modules["plugins"]
+    plugins.isValid.return_value = True
+    plugins.getPluginName.return_value = "Sytrus"
+    plugins.getParamCount.return_value = 2
+    plugins.getPresetCount.return_value = 12
+    plugins.getColor.return_value = 0xFF8800
+    plugins.getParamName.side_effect = lambda i, *_: ["Cutoff", "Res"][i]
+    plugins.getParamValue.return_value = 0.5
+    plugins.getParamValueString.return_value = "50%"
+
+    result = controller.dispatch_command("plugins.getParams", {"index": 3, "slot_index": 2})
+
+    assert {k: v for k, v in result.items() if k != "params"} == {
+        "valid": True, "name": "Sytrus", "param_count": 2, "preset_count": 12,
+        "color": "0xff8800",
+    }
+    assert [p["name"] for p in result["params"]] == ["Cutoff", "Res"]
+    plugins.getParamCount.assert_called_with(3, 2, True)
+
+
+def test_plugins_get_params_invalid_plugin_is_not_an_error(fl):
+    controller, modules = fl
+    modules["plugins"].isValid.return_value = False
+
+    result = controller.dispatch_command("plugins.getParams", {"index": 9})
+
+    assert result == {"valid": False, "params": []}
+    modules["plugins"].getParamCount.assert_not_called()

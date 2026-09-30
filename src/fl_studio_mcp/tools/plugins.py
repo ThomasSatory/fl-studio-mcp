@@ -19,79 +19,17 @@ def register_plugin_tools(mcp: FastMCP) -> None:
     from fl_studio_mcp.utils.connection import get_connection
 
     @mcp.tool()
-    def fl_is_plugin_valid(
-        index: int,
-        slot_index: int = -1,
-        use_global_index: bool = True
-    ) -> bool:
-        """Check if a plugin exists at the given location.
-
-        For channel rack plugins, use just index.
-        For mixer effect plugins, use index as mixer track and slot_index as effect slot.
-
-        Args:
-            index: Channel index (global) or mixer track index
-            slot_index: Effect slot index for mixer plugins (-1 for channel rack)
-            use_global_index: Whether to use global channel indexing
-        """
-        result = run(get_connection(), "plugins.isValid", {
-            "index": index,
-            "slot_index": slot_index,
-            "use_global": use_global_index,
-        })
-
-        return result.get("valid", False)
-
-    @mcp.tool()
-    def fl_get_plugin_name(
-        index: int,
-        slot_index: int = -1,
-        use_global_index: bool = True
-    ) -> str:
-        """Get the name of a plugin.
-
-        Args:
-            index: Channel index (global) or mixer track index
-            slot_index: Effect slot index for mixer plugins (-1 for channel rack)
-            use_global_index: Whether to use global channel indexing
-        """
-        result = run(get_connection(), "plugins.getName", {
-            "index": index,
-            "slot_index": slot_index,
-            "use_global": use_global_index,
-        })
-
-        return result.get("name", "")
-
-    @mcp.tool()
-    def fl_get_plugin_param_count(
-        index: int,
-        slot_index: int = -1,
-        use_global_index: bool = True
-    ) -> int:
-        """Get the number of parameters a plugin has.
-
-        Args:
-            index: Channel index (global) or mixer track index
-            slot_index: Effect slot index for mixer plugins (-1 for channel rack)
-            use_global_index: Whether to use global channel indexing
-        """
-        result = run(get_connection(), "plugins.getParamCount", {
-            "index": index,
-            "slot_index": slot_index,
-            "use_global": use_global_index,
-        })
-
-        return result.get("count", 0)
-
-    @mcp.tool()
     def fl_get_plugin_params(
         index: int,
         slot_index: int = -1,
         use_global_index: bool = True,
         max_params: int = 50
-    ) -> list[dict]:
-        """Get all parameters of a plugin with their current values.
+    ) -> dict:
+        """Describe a plugin and list its parameters with current values.
+
+        Returns {"valid", "name", "param_count", "preset_count", "color",
+        "params": [{index, name, value, value_string}]}. When no plugin sits
+        at that location: {"valid": false, "params": []} (not an error).
 
         Args:
             index: Channel index (global) or mixer track index
@@ -106,7 +44,8 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             "max_params": max_params,
         })
 
-        return result.get("params", [])
+        keys = ("valid", "name", "param_count", "preset_count", "color", "params")
+        return {key: result[key] for key in keys if key in result}
 
     @mcp.tool()
     def fl_get_plugin_param_value(
@@ -168,27 +107,6 @@ def register_plugin_tools(mcp: FastMCP) -> None:
         return f"Parameter '{name}' set to {new_value:.4f} ({value_str})"
 
     @mcp.tool()
-    def fl_get_preset_count(
-        index: int,
-        slot_index: int = -1,
-        use_global_index: bool = True
-    ) -> int:
-        """Get the number of presets available for a plugin.
-
-        Args:
-            index: Channel index (global) or mixer track index
-            slot_index: Effect slot index for mixer plugins (-1 for channel rack)
-            use_global_index: Whether to use global channel indexing
-        """
-        result = run(get_connection(), "plugins.getPresetCount", {
-            "index": index,
-            "slot_index": slot_index,
-            "use_global": use_global_index,
-        })
-
-        return result.get("count", 0)
-
-    @mcp.tool()
     def fl_next_preset(
         index: int,
         slot_index: int = -1,
@@ -232,23 +150,3 @@ def register_plugin_tools(mcp: FastMCP) -> None:
         plugin_name = result.get("plugin_name", "Plugin")
         return f"Switched '{plugin_name}' to previous preset"
 
-    @mcp.tool()
-    def fl_get_plugin_color(
-        index: int,
-        slot_index: int = -1,
-        use_global_index: bool = True
-    ) -> str:
-        """Get the color of a plugin.
-
-        Args:
-            index: Channel index (global) or mixer track index
-            slot_index: Effect slot index for mixer plugins (-1 for channel rack)
-            use_global_index: Whether to use global channel indexing
-        """
-        result = run(get_connection(), "plugins.getColor", {
-            "index": index,
-            "slot_index": slot_index,
-            "use_global": use_global_index,
-        })
-
-        return result.get("color", "0x0")

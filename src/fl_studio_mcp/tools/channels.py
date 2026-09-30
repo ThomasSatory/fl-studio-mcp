@@ -17,18 +17,6 @@ def register_channel_tools(mcp: FastMCP) -> None:
     from fl_studio_mcp.utils.connection import get_connection
 
     @mcp.tool()
-    def fl_get_channel_count(global_count: bool = True) -> int:
-        """Get the number of channels in the channel rack.
-
-        Args:
-            global_count: If True, returns total channels ignoring groups.
-                         If False, returns channels in current group only.
-        """
-        result = run(get_connection(), "channels.getCount", {"global_count": global_count})
-
-        return result.get("count", 0)
-
-    @mcp.tool()
     def fl_get_channel_info(index: int, use_global_index: bool = True) -> dict:
         """Get detailed information about a channel.
 
@@ -56,32 +44,32 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def fl_get_all_channels() -> list[dict]:
-        """Get information about all channels in the channel rack.
+        """List every channel in the channel rack.
 
-        Returns a list of all channels with their basic properties.
+        Each channel: index (global), name, volume, pan, is_muted, is_solo,
+        is_selected, target_fx_track. The channel count is the list length;
+        the selected channel(s) have is_selected true.
         """
         result = run(get_connection(), "channels.getAll")
 
         return result.get("channels", [])
 
     @mcp.tool()
-    def fl_get_selected_channel() -> dict | None:
-        """Get information about the currently selected channel.
-
-        Returns None if no channel is selected.
-        """
-        result = run(get_connection(), "channels.getSelected")
-
-        return result.get("channel")
-
-    @mcp.tool()
-    def fl_select_channel(index: int, select: bool = True) -> str:
+    def fl_select_channel(index: int, select: bool = True, exclusive: bool = False) -> str:
         """Select or deselect a channel.
 
         Args:
             index: Channel index (global)
             select: True to select, False to deselect
+            exclusive: True to select only this channel, deselecting all others
         """
+        if exclusive:
+            if not select:
+                raise ToolError("exclusive=True requires select=True")
+            result = run(get_connection(), "channels.selectOne", {"index": index})
+            channel_name = result.get("channel_name", f"Channel {index}")
+            return f"Channel '{channel_name}' selected exclusively"
+
         result = run(get_connection(), "channels.select", {
             "index": index,
             "select": select,
@@ -89,18 +77,6 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
         channel_name = result.get("channel_name", f"Channel {index}")
         return f"Channel '{channel_name}' {'selected' if select else 'deselected'}"
-
-    @mcp.tool()
-    def fl_select_one_channel(index: int) -> str:
-        """Select only one channel, deselecting all others.
-
-        Args:
-            index: Channel index (global) to select exclusively
-        """
-        result = run(get_connection(), "channels.selectOne", {"index": index})
-
-        channel_name = result.get("channel_name", f"Channel {index}")
-        return f"Channel '{channel_name}' selected exclusively"
 
     @mcp.tool()
     def fl_trigger_note(
@@ -268,21 +244,6 @@ def register_channel_tools(mcp: FastMCP) -> None:
         return f"Channel '{channel_name}' routed to mixer track {mixer_track}"
 
     # Step Sequencer Tools
-
-    @mcp.tool()
-    def fl_get_grid_bit(channel: int, position: int) -> bool:
-        """Get whether a step is active in the step sequencer.
-
-        Args:
-            channel: Channel index (global)
-            position: Step position (0-based)
-        """
-        result = run(get_connection(), "channels.getGridBit", {
-            "channel": channel,
-            "position": position,
-        })
-
-        return result.get("value", False)
 
     @mcp.tool()
     def fl_set_grid_bit(channel: int, position: int, value: bool) -> str:
