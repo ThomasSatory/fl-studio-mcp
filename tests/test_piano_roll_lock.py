@@ -40,7 +40,8 @@ def test_concurrent_send_notes_are_serialised(tmp_path, monkeypatch):
                 json.dumps({"ppq": 96, "noteCount": 1, "notes": []})
             )
             (scripts_dir / "mcp_response.json").write_text(
-                json.dumps({"status": "success", "notes_added": after, "notes_deleted": 0})
+                json.dumps({"status": "success", "notes_added": after, "notes_deleted": 0,
+                            "script_version": 2, "note_count": after})
             )
             return True
 
@@ -65,4 +66,4 @@ def test_concurrent_send_notes_are_serialised(tmp_path, monkeypatch):
 
     assert batches_seen == [(1, 1), (1, 1)]
     assert len(results) == 2
-    assert all("1 note(s) added" in r for r in results)
+    assert all("1 note(s) written" in r for r in results)

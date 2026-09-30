@@ -125,6 +125,12 @@ PR_FL_PROBE_FAILED = (
     "Security > Automation, then retry."
 )
 
+PR_SCRIPT_OUTDATED = (
+    "ComposeWithLLM.pyscript in FL Studio is outdated (its answer has no "
+    "script_version). Reinstall it with scripts/setup.sh, then run it once from "
+    "the piano roll's Tools > Scripting menu."
+)
+
 # Serialises the whole note round-trip (queue write, focus, keystroke, wait).
 _PR_LOCK = threading.Lock()
 
@@ -462,19 +468,52 @@ def _summarize_notes(notes: list[dict], limit: int = 8) -> str:
     return text
 
 
-def _get_trigger_info(auto_trigger: bool) -> str:
-    """Run the piano roll script (if requested); raise when FL Studio did not process it."""
-    if not auto_trigger:
-        return ""
-    outcome = _run_pr_script()
+def _uses_extended_props(notes: list[dict]) -> bool:
+    return any(
+        n.get(p, NOTE_DEFAULTS[p]) != NOTE_DEFAULTS[p] for n in notes for p in EXTENDED_PROPS
+    )
+
+
+def _note_count_text(response: dict) -> str:
+    count = response.get("note_count")
+    return f" The piano roll now has {count} notes." if count is not None else ""
+
+
+def _checked_response(outcome: dict, notes_sent: list[dict] | None = None) -> tuple[dict, str]:
+    """Raise ToolError unless the script provably did what was asked.
+
+    Returns the script's response and a warning suffix ("" when none). With
+    `notes_sent`, the number of notes FL added must match it.
+    """
     if not outcome["ran"]:
         raise ToolError(outcome["error"])
     response = outcome.get("response") or {}
+    added = response.get("notes_added") or 0
+    deleted = response.get("notes_deleted") or 0
+    if not response:
+        if notes_sent is not None:
+            raise ToolError(
+                "FL Studio ran the piano roll script but it processed nothing: the "
+                "request was not in its queue. Check fl_get_piano_roll_info and retry."
+            )
+        return response, ""
     if response.get("status") == "error":
         raise ToolError(
-            f"FL Studio ran the script but it reported an error: {response.get('message')}"
+            f"FL Studio applied {added} added and {deleted} deleted note(s), then "
+            f"failed: {response.get('message')}"
         )
-    return " " + _describe_run(outcome)
+    suffix = ""
+    if "script_version" not in response:
+        if notes_sent is not None and _uses_extended_props(notes_sent):
+            raise ToolError(
+                f"{PR_SCRIPT_OUTDATED} The notes were written without pan/color/slide/porta."
+            )
+        suffix = f" Warning: {PR_SCRIPT_OUTDATED}"
+    if notes_sent is not None and added != len(notes_sent):
+        raise ToolError(
+            f"Sent {len(notes_sent)} note(s) but FL Studio reports {added} added."
+        )
+    return response, suffix
 
 
 def register_piano_roll_tools(mcp: FastMCP) -> None:
@@ -518,8 +557,12 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             _write_request(requests)
             if not auto_trigger:
                 return f"Queued {len(normalized)} note(s): {summary}. {NOT_VERIFIED_HINT}"
-            trigger_info = _get_trigger_info(True)
-        return f"Queued {len(normalized)} note(s): {summary}.{trigger_info}"
+            outcome = _run_pr_script()
+        response, warning = _checked_response(outcome, normalized)
+        return (
+            f"{len(normalized)} note(s) written: {summary}."
+            f"{_note_count_text(response)}{warning}"
+        )
 
     @mcp.tool()
     def fl_send_chord(
@@ -572,8 +615,12 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             _write_request({"action": "add_notes", "notes": normalized})
             if not auto_trigger:
                 return f"Queued chord {summary}. {NOT_VERIFIED_HINT}"
-            trigger_info = _get_trigger_info(True)
-        return f"Queued chord {summary}.{trigger_info}"
+            outcome = _run_pr_script()
+        response, warning = _checked_response(outcome, normalized)
+        return (
+            f"{len(normalized)} note(s) written: {summary}."
+            f"{_note_count_text(response)}{warning}"
+        )
 
     @mcp.tool()
     def fl_delete_notes(notes: list[dict], auto_trigger: bool = True) -> str:
@@ -591,21 +638,30 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             _write_request({"action": "delete_notes", "notes": normalized})
             if not auto_trigger:
                 return f"Queued deletion of {len(normalized)} note(s). {NOT_VERIFIED_HINT}"
-            trigger_info = _get_trigger_info(True)
-        return f"Queued deletion of {len(normalized)} note(s).{trigger_info}"
+            outcome = _run_pr_script()
+        response, warning = _checked_response(outcome)
+        return (
+            f"{response.get('notes_deleted') or 0} note(s) deleted."
+            f"{_note_count_text(response)}{warning}"
+        )
 
     @mcp.tool()
     def fl_clear_piano_roll(auto_trigger: bool = True) -> str:
-        """Clear all notes from the FL Studio piano roll.
+        """Delete every note in the open piano roll.
 
         Args:
-            auto_trigger: Whether to automatically trigger FL Studio
+            auto_trigger: run the piano roll script now and verify the result
         """
-        request = {"action": "clear"}
         with _PR_LOCK:
-            _write_request(request)
-            trigger_info = _get_trigger_info(auto_trigger)
-        return f"Queued clear all notes.{trigger_info}"
+            _write_request({"action": "clear"})
+            if not auto_trigger:
+                return f"Queued clear of all notes. {NOT_VERIFIED_HINT}"
+            outcome = _run_pr_script()
+        response, warning = _checked_response(outcome)
+        return (
+            f"Piano roll cleared ({response.get('notes_deleted') or 0} note(s) removed)."
+            f"{_note_count_text(response)}{warning}"
+        )
 
     @mcp.tool()
     def fl_get_piano_roll_state() -> dict:
@@ -645,16 +701,17 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def fl_trigger_script() -> str:
-        """Manually trigger FL Studio to process pending note requests.
+        """Run the ComposeWithLLM piano roll script on the queued requests.
 
-        This sends the keystroke (Cmd+Opt+Y on macOS, Ctrl+Alt+Y on Windows)
-        to FL Studio to execute the ComposeWithLLM piano roll script.
+        Sends the keystroke (Cmd+Opt+Y on macOS, Ctrl+Alt+Y on Windows/Linux)
+        and reports what the script did; raises if it failed or did not run.
         """
         with _PR_LOCK:
             outcome = _run_pr_script()
-        if not outcome["ran"]:
-            raise ToolError(outcome["error"])
-        return _describe_run(outcome)
+        response, warning = _checked_response(outcome)
+        if not response:
+            return "FL Studio ran the piano roll script (nothing was queued)."
+        return f"{_describe_run(outcome)}{_note_count_text(response)}{warning}"
 
     @mcp.tool()
     def fl_get_pr_context() -> dict:
