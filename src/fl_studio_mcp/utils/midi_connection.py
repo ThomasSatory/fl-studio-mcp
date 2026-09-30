@@ -20,6 +20,47 @@ import time
 from pathlib import Path
 from typing import Any
 
+MIDI_PORT_ENV = "FL_STUDIO_MCP_MIDI_PORT"
+
+# Substrings identifying virtual (software) MIDI ports, in order of preference.
+PORT_HINTS = ("IAC", "loopMIDI", "Midi Through")
+
+
+class PortSelectionError(RuntimeError):
+    """No MIDI output port could be chosen safely."""
+
+
+def select_output_port(available: list[str], requested: str | None) -> str:
+    """Pick the port to send trigger notes to, or raise PortSelectionError.
+
+    Sending note 127 at full velocity to a hardware synth is not acceptable,
+    so there is no fallback: the port must match `requested` (exact name,
+    then case-insensitive substring) or contain one of PORT_HINTS.
+    """
+    listing = ", ".join(repr(p) for p in available) or "none"
+    if requested:
+        for port in available:
+            if port == requested:
+                return port
+        lowered = requested.lower()
+        for port in available:
+            if lowered in port.lower():
+                return port
+        raise PortSelectionError(
+            f"{MIDI_PORT_ENV}={requested!r} matches none of the MIDI output ports: {listing}."
+        )
+    for hint in PORT_HINTS:
+        for port in available:
+            if hint.lower() in port.lower():
+                return port
+    raise PortSelectionError(
+        "No virtual MIDI port found; refusing to send trigger notes to another device. "
+        f"Ports seen: {listing}. On macOS enable the IAC Driver in Audio MIDI Setup "
+        "(Window > Show MIDI Studio, double-click IAC Driver, tick 'Device is online'); "
+        "on Windows create a loopMIDI port; or set "
+        f"{MIDI_PORT_ENV} to the name of the port FL Studio listens on."
+    )
+
 
 def get_fl_settings_base() -> Path:
     """Get the FL Studio Settings directory (shared base for Hardware/Piano roll)."""
@@ -117,53 +158,11 @@ class MIDIConnection:
             self._error = f"Failed to get MIDI ports: {e}"
             return False
 
-        if not output_ports:
-            self._error = (
-                "No MIDI output ports found. On Mac, enable IAC Driver in Audio MIDI Setup."
-            )
+        try:
+            target_port = select_output_port(output_ports, os.environ.get(MIDI_PORT_ENV))
+        except PortSelectionError as e:
+            self._error = str(e)
             return False
-
-        system = platform.system()
-
-        env_port = os.environ.get("FL_STUDIO_MCP_MIDI_PORT")
-        if env_port:
-            matches = [p for p in output_ports if p == env_port or env_port in p]
-            target_port = matches[0] if matches else None
-            if target_port is None:
-                self._error = (
-                    f"FL_STUDIO_MCP_MIDI_PORT ({env_port!r}) matches none of "
-                    f"the available ports: {output_ports}"
-                )
-                return False
-        elif system == "Linux":
-            # FL Studio under Wine: the persistent kernel "Midi Through" ALSA
-            # port is the reliable Linux->Wine bridge (verified with a
-            # winegcc midiIn test). Never fall back to the first port blindly
-            # -- that would send trigger notes to real hardware.
-            target_port = next((p for p in output_ports if "Midi Through" in p), None)
-            if target_port is None:
-                self._error = (
-                    "No 'Midi Through' ALSA port found (snd-seq-dummy). "
-                    "Enable it or set FL_STUDIO_MCP_MIDI_PORT. Ports: "
-                    f"{output_ports}"
-                )
-                return False
-        else:
-            # Look for IAC Driver (Mac) or other virtual MIDI ports
-            target_port = None
-            for port_name in output_ports:
-                # Prefer IAC Driver on Mac
-                if "IAC" in port_name:
-                    target_port = port_name
-                    break
-                # Also accept loopMIDI on Windows or any port with "FL" in name
-                if "loopMIDI" in port_name or "FL" in port_name.upper():
-                    target_port = port_name
-                    break
-
-            # If no specific port found, use the first available
-            if target_port is None:
-                target_port = output_ports[0]
 
         try:
             self._port = mido.open_output(target_port)
