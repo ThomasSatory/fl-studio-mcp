@@ -25,6 +25,17 @@ REQUEST_FILE = os.path.join(get_script_dir(), "mcp_request.json")
 RESPONSE_FILE = os.path.join(get_script_dir(), "mcp_response.json")
 STATE_FILE = os.path.join(get_script_dir(), "piano_roll_state.json")
 
+# Bumped when the request/response format changes; the MCP server checks it.
+SCRIPT_VERSION = 2
+# Optional note properties sent by the MCP server (server-validated).
+NOTE_PROPERTIES = ("pan", "color", "slide", "porta")
+
+
+def _apply_note_properties(midi_note, note_data):
+    for prop in NOTE_PROPERTIES:
+        if prop in note_data:
+            setattr(midi_note, prop, note_data[prop])
+
 
 def write_json(path, data):
     """Write JSON in a single call.
@@ -118,191 +129,155 @@ def get_piano_roll_context():
 
 
 def process_mcp_request():
-    """Check for and process all requests from the MCP server"""
+    """Process every queued request; one failing request does not stop the others.
+
+    FL has no transaction: what succeeded before a failure stays applied, and
+    the counters report it.
+    """
     if not os.path.exists(REQUEST_FILE):
         return None
 
     try:
         with open(REQUEST_FILE, 'r') as f:
             content = json.load(f)
+    except Exception as e:
+        return {"status": "error", "message": "could not read request file: %s" % e,
+                "script_version": SCRIPT_VERSION, "note_count": flp.score.noteCount}
 
-        # Handle both single request (old format) and list of requests (new format)
-        if isinstance(content, list):
-            requests = content
-        elif isinstance(content, dict) and content.get("action"):
-            requests = [content]
-        else:
-            # Empty or invalid
-            return None
+    # Handle both single request (old format) and list of requests (new format)
+    if isinstance(content, list):
+        requests = content
+    elif isinstance(content, dict) and content.get("action"):
+        requests = [content]
+    else:
+        return None
+    if not requests:
+        return None
 
-        if not requests:
-            return None
+    total_notes = 0
+    notes_deleted = 0
+    context_result = None
+    failures = []
+    handlers = {
+        "add_notes": add_notes_to_piano_roll,
+        "add_chord": add_chord_to_piano_roll,
+        "delete_notes": delete_notes_from_piano_roll,
+    }
 
-        # Process all requests in order
-        total_notes = 0
-        notes_deleted = 0
-        context_result = None
-
-        for request in requests:
-            action = request.get("action")
-
+    for position, request in enumerate(requests):
+        action = request.get("action") if isinstance(request, dict) else None
+        try:
             if action == "get_context":
                 context_result = get_piano_roll_context()
             elif action == "clear":
-                # Clear all notes
                 count = flp.score.noteCount
                 for i in range(count - 1, -1, -1):
                     flp.score.deleteNote(i)
                 notes_deleted += count
-            elif action == "delete_notes":
-                result = delete_notes_from_piano_roll(request)
-                if result and result.get("status") == "success":
-                    notes_deleted += result.get("notes_deleted", 0)
-            elif action == "add_chord":
-                result = add_chord_to_piano_roll(request)
-                if result and result.get("status") == "success":
-                    total_notes += result.get("notes_added", 0)
-            elif action == "add_notes":
-                result = add_notes_to_piano_roll(request)
-                if result and result.get("status") == "success":
-                    total_notes += result.get("notes_added", 0)
+            elif action in handlers:
+                result = handlers[action](request) or {}
+                total_notes += result.get("notes_added", 0)
+                notes_deleted += result.get("notes_deleted", 0)
+                if result.get("status") != "success":
+                    failures.append({"index": position, "action": action,
+                                     "message": result.get("message", "unknown error")})
+            else:
+                failures.append({"index": position, "action": action,
+                                 "message": "unknown action %r" % (action,)})
+        except Exception as e:
+            failures.append({"index": position, "action": action, "message": str(e)})
 
-        # Clear the request queue after processing
-        with open(REQUEST_FILE, 'w') as f:
-            f.write("[]")
+    # Clear the request queue after processing, even after a failure
+    with open(REQUEST_FILE, 'w') as f:
+        f.write("[]")
 
-        summary = {
-            "status": "success",
-            "requests_processed": len(requests),
-            "notes_added": total_notes,
-            "notes_deleted": notes_deleted
-        }
-        if context_result is not None:
-            summary["context"] = context_result.get("context", context_result)
-        return summary
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    summary = {
+        "status": "error" if failures else "success",
+        "requests_processed": len(requests),
+        "notes_added": total_notes,
+        "notes_deleted": notes_deleted,
+        "script_version": SCRIPT_VERSION,
+        "note_count": flp.score.noteCount,
+    }
+    if failures:
+        first = failures[0]
+        summary["message"] = "action %d (%s) failed: %s" % (
+            first["index"], first["action"], first["message"])
+        summary["failures"] = failures
+    if context_result is not None:
+        summary["context"] = context_result.get("context", context_result)
+    return summary
 
 
 def add_chord_to_piano_roll(request):
-    """Add a chord's notes to the piano roll from MCP request.
-
-    Chord format allows setting a base time and duration for all notes,
-    with optional per-note offsets and durations.
+    """Add a chord's notes (legacy action; the MCP server now sends add_notes).
 
     Request format:
-    {
-        "action": "add_chord",
-        "time": 0,           # Base time in quarter notes
-        "duration": 1.0,     # Default duration for all notes
-        "notes": [
-            {"midi": 60},                    # Uses base time and duration
-            {"midi": 64, "offset": 0.5},     # Starts 0.5 beats after base time
-            {"midi": 67, "duration": 2.0},   # Custom duration
-        ]
-    }
+    {"action": "add_chord", "time": 0, "duration": 1.0,
+     "notes": [{"midi": 60}, {"midi": 64, "offset": 0.5}, {"midi": 67, "duration": 2.0}]}
     """
+    added = 0
     try:
-        notes = request.get("notes", [])
         ppq = flp.score.PPQ
-        chord_time = request.get("time", 0)
-        current_time = int(ppq * chord_time)
-        duration_multiplier = request.get("duration", 1.0)
-
-        for note_data in notes:
+        current_time = int(ppq * request.get("time", 0))
+        default_duration = request.get("duration", 1.0)
+        for note_data in request.get("notes", []):
             midi_note = flp.Note()
             midi_note.number = note_data["midi"]
             midi_note.time = current_time + int(ppq * note_data.get("offset", 0))
-            note_duration = note_data.get("duration", duration_multiplier)
-            midi_note.length = int(ppq * note_duration)
+            midi_note.length = int(ppq * note_data.get("duration", default_duration))
             midi_note.velocity = note_data.get("velocity", 0.8)
+            _apply_note_properties(midi_note, note_data)
             flp.score.addNote(midi_note)
-
-        return {
-            "status": "success",
-            "notes_added": len(notes)
-        }
-
+            added += 1
+        return {"status": "success", "notes_added": added}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": str(e), "notes_added": added}
 
 
 def delete_notes_from_piano_roll(request):
-    """Delete specific notes from the piano roll.
+    """Delete notes matching (midi, time in quarter notes).
 
     Request format:
-    {
-        "action": "delete_notes",
-        "notes": [
-            {"midi": 60, "time": 0},
-            {"midi": 64, "time": 0},
-        ]
-    }
+    {"action": "delete_notes", "notes": [{"midi": 60, "time": 0}]}
     """
+    deleted = 0
     try:
-        notes_to_delete = request.get("notes", [])
         ppq = flp.score.PPQ
-        deleted_count = 0
-
-        # Convert delete criteria to ticks for comparison
-        delete_criteria = []
-        for note_data in notes_to_delete:
-            delete_criteria.append({
-                "midi": note_data["midi"],
-                "time": int(ppq * note_data["time"])
-            })
-
-        # Iterate backward through existing notes and delete matches
+        criteria = [(n["midi"], int(ppq * n.get("time", 0))) for n in request.get("notes", [])]
         for i in range(flp.score.noteCount - 1, -1, -1):
             note = flp.score.getNote(i)
-            for criteria in delete_criteria:
-                if note.number == criteria["midi"] and note.time == criteria["time"]:
-                    flp.score.deleteNote(i)
-                    deleted_count += 1
-                    break
-
-        return {
-            "status": "success",
-            "notes_deleted": deleted_count
-        }
-
+            if (note.number, note.time) in criteria:
+                flp.score.deleteNote(i)
+                deleted += 1
+        return {"status": "success", "notes_deleted": deleted}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": str(e), "notes_deleted": deleted}
 
 
 def add_notes_to_piano_roll(request):
-    """Add arbitrary notes to the piano roll from MCP request.
+    """Add notes; times and durations in quarter notes.
 
     Request format:
-    {
-        "action": "add_notes",
-        "notes": [
-            {"midi": 60, "time": 0, "duration": 1.0, "velocity": 0.8},
-            {"midi": 64, "time": 1.0, "duration": 0.5},
-        ]
-    }
+    {"action": "add_notes", "notes": [
+        {"midi": 60, "time": 0, "duration": 1.0, "velocity": 0.8,
+         "pan": 0.5, "color": 0, "slide": false, "porta": false}]}
     """
+    added = 0
     try:
-        notes = request.get("notes", [])
         ppq = flp.score.PPQ
-
-        for note_data in notes:
+        for note_data in request.get("notes", []):
             midi_note = flp.Note()
             midi_note.number = note_data["midi"]
-            note_time = note_data.get("time", note_data.get("offset", 0))
-            midi_note.time = int(ppq * note_time)
+            midi_note.time = int(ppq * note_data.get("time", note_data.get("offset", 0)))
             midi_note.length = int(ppq * note_data["duration"])
             midi_note.velocity = note_data.get("velocity", 0.8)
+            _apply_note_properties(midi_note, note_data)
             flp.score.addNote(midi_note)
-
-        return {
-            "status": "success",
-            "notes_added": len(notes)
-        }
-
+            added += 1
+        return {"status": "success", "notes_added": added}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": str(e), "notes_added": added}
 
 
 def apply(form=None):

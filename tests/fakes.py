@@ -9,7 +9,9 @@ mcp_response.json) when the trigger note is sent.
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -128,3 +130,75 @@ def make_connection(tmp_path: Path, monkeypatch) -> MIDIConnection:
     conn._connected = True
     conn._port_name = "FakePort"
     return conn
+
+
+PIANO_ROLL_SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "ComposeWithLLM.pyscript"
+)
+
+
+class FakeNote:
+    """flpianoroll.Note with the attributes the script reads and writes."""
+
+    def __init__(self) -> None:
+        self.number = 0
+        self.time = 0
+        self.length = 0
+        self.velocity = 0.8
+        self.pan = 0.5
+        self.color = 0
+        self.fcut = 0.5
+        self.fres = 0.5
+        self.slide = False
+        self.porta = False
+        self.pitchofs = 0
+        self.selected = False
+        self.muted = False
+
+
+class FakeScore:
+    """flpianoroll.score: a plain list of notes."""
+
+    PPQ = 96
+    tsnum = 4
+    tsden = 4
+    markerCount = 0
+    snap_root_note = 0
+    snap_scale_helper = 0
+
+    def __init__(self) -> None:
+        self.notes: list[FakeNote] = []
+
+    @property
+    def noteCount(self) -> int:  # noqa: N802 - FL's API name
+        return len(self.notes)
+
+    def getNote(self, index: int) -> FakeNote:  # noqa: N802
+        return self.notes[index]
+
+    def addNote(self, note: FakeNote) -> None:  # noqa: N802
+        self.notes.append(note)
+
+    def deleteNote(self, index: int) -> None:  # noqa: N802
+        del self.notes[index]
+
+    def getTimelineSelection(self) -> tuple[int, int]:  # noqa: N802
+        return (-1, -1)
+
+
+def load_piano_roll_script(monkeypatch, tmp_path: Path) -> tuple[ModuleType, ModuleType]:
+    """Import ComposeWithLLM.pyscript with a fake flpianoroll; its files land under tmp_path."""
+    flp = ModuleType("flpianoroll")
+    flp.score = FakeScore()
+    flp.Note = FakeNote
+    monkeypatch.setitem(sys.modules, "flpianoroll", flp)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    loader = importlib.machinery.SourceFileLoader(
+        "compose_with_llm_under_test", str(PIANO_ROLL_SCRIPT_PATH)
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    script = importlib.util.module_from_spec(spec)
+    loader.exec_module(script)
+    os.makedirs(script.get_script_dir(), exist_ok=True)
+    return script, flp
