@@ -218,3 +218,19 @@ def test_plugins_get_params_invalid_plugin_is_not_an_error(fl):
 
     assert result == {"valid": False, "params": []}
     modules["plugins"].getParamCount.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("action", "params"),
+    [("channels.getAll", {}), ("channels.getInfo", {"index": 0}),
+     ("channels.getSelected", {}), ("channels.setVolume", {"index": 0, "volume": 0.5})],
+)
+def test_channel_volume_is_read_normalized_with_global_index(fl, action, params):
+    controller, modules = fl
+    modules["channels"].selectedChannel.return_value = 0
+
+    controller.dispatch_command(action, params)
+
+    for call in modules["channels"].getChannelVolume.call_args_list:
+        # The 2nd positional argument is `mode` (True = dB), not the index mode.
+        assert len(call.args) == 1 and call.kwargs == {"useGlobalIndex": True}, call

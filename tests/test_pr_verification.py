@@ -138,3 +138,23 @@ def test_delete_and_clear_report_deleted_count(make_tools):
     assert tools["fl_clear_piano_roll"]() == (
         "Piano roll cleared (2 note(s) removed). The piano roll now has 5 notes."
     )
+
+
+def test_notes_queued_earlier_are_counted_not_blamed(make_tools):
+    # First call only queued (e.g. the script had not been run by hand yet);
+    # the next call's run processes both batches.
+    tools = make_tools(v2(notes_added=5, note_count=5))
+    tools["fl_send_notes"]([{"midi": n, "duration": 1} for n in (60, 62, 64)], auto_trigger=False)
+
+    text = tools["fl_send_notes"]([{"midi": 65, "duration": 1}, {"midi": 67, "duration": 1}])
+
+    assert "2 note(s) written" in text
+    assert "3 note(s) queued earlier were also written" in text
+
+
+def test_mismatch_accounts_for_notes_queued_earlier(make_tools):
+    tools = make_tools(v2(notes_added=3))
+    tools["fl_send_notes"]([{"midi": 60, "duration": 1}], auto_trigger=False)
+
+    with pytest.raises(ToolError, match="Sent 1 note\\(s\\) \\(plus 1 queued earlier\\).*3 added"):
+        tools["fl_send_notes"]([{"midi": 62, "duration": 1}])

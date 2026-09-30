@@ -8,6 +8,7 @@ from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.annotations import ACTION, DESTRUCTIVE, IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils.errors import run
+from fl_studio_mcp.utils.midi_connection import OUTDATED_CONTROLLER_HINT
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -52,8 +53,11 @@ def register_channel_tools(mcp: FastMCP) -> None:
         the selected channel(s) have is_selected true.
         """
         result = run(get_connection(), "channels.getAll")
+        channels = result.get("channels", [])
+        if channels and "volume" not in channels[0]:
+            raise ToolError(OUTDATED_CONTROLLER_HINT)
 
-        return result.get("channels", [])
+        return channels
 
     @mcp.tool(annotations=IDEMPOTENT)
     def fl_select_channel(index: int, select: bool = True, exclusive: bool = False) -> str:

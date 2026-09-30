@@ -74,12 +74,13 @@ def test_empty_list_is_an_error():
         _validate_notes([])
 
 
-def test_delete_mode_needs_no_duration_and_refuses_add_fields():
+def test_delete_mode_needs_no_duration_and_ignores_state_fields():
     assert _validate_notes([{"note": "C4", "time": 2}], require_duration=False) == [
         {"midi": 60, "time": 2.0}
     ]
-    with pytest.raises(ToolError, match="unknown field\\(s\\) duration"):
-        _validate_notes([{"midi": 60, "duration": 1}], require_duration=False)
+    assert _validate_notes([{"midi": 60, "duration": 1}], require_duration=False) == [
+        {"midi": 60, "time": 0.0}
+    ]
 
 
 def test_invalid_note_queues_nothing(tools, tmp_path):
@@ -152,3 +153,21 @@ def test_state_notes_get_names(tools, tmp_path, monkeypatch):
         piano_roll, "_read_state", lambda: {"ppq": 96, "notes": [{"midi": 61}]}
     )
     assert tools["fl_get_piano_roll_state"]()["notes"][0]["note_name"] == "C#4"
+
+
+def test_delete_accepts_notes_read_from_the_state(tools, tmp_path):
+    state_note = {
+        "number": 60, "midi": 60, "time": 1.0, "time_ticks": 96, "duration": 1.0,
+        "length_ticks": 96, "velocity": 0.8, "pan": 0.5, "color": 0, "fcut": 0.5,
+        "fres": 0.5, "slide": False, "porta": False, "pitchofs": 0, "selected": False,
+        "muted": False, "note_name": "C4",
+    }
+    tools["fl_delete_notes"]([state_note], auto_trigger=False)
+
+    (request,) = queued(tmp_path)
+    assert request["notes"] == [{"midi": 60, "time": 1.0}]
+
+
+def test_delete_still_rejects_typos(tools):
+    with pytest.raises(ToolError, match="unknown field\\(s\\) tiem"):
+        tools["fl_delete_notes"]([{"midi": 60, "tiem": 0}], auto_trigger=False)

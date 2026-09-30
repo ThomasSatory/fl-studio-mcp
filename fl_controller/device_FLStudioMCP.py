@@ -950,7 +950,7 @@ def handle_channels_get_info(params: dict) -> dict:
         "index": index,
         "name": channels.getChannelName(index, use_global),
         "color": hex(channels.getChannelColor(index, use_global)),
-        "volume": channels.getChannelVolume(index, use_global),
+        "volume": channels.getChannelVolume(index, useGlobalIndex=use_global),
         "pan": channels.getChannelPan(index, use_global),
         "pitch": channels.getChannelPitch(index, useGlobalIndex=use_global),
         "is_muted": channels.isChannelMuted(index, use_global) == 1,
@@ -969,7 +969,7 @@ def handle_channels_get_all() -> dict:
         channels_list.append({
             "index": i,
             "name": channels.getChannelName(i, True),
-            "volume": channels.getChannelVolume(i, True),
+            "volume": channels.getChannelVolume(i, useGlobalIndex=True),
             "pan": channels.getChannelPan(i, True),
             "is_muted": channels.isChannelMuted(i, True) == 1,
             "is_solo": channels.isChannelSolo(i, True) == 1,
@@ -991,7 +991,7 @@ def handle_channels_get_selected() -> dict:
         "channel": {
             "index": index,
             "name": channels.getChannelName(index, True),
-            "volume": channels.getChannelVolume(index, True),
+            "volume": channels.getChannelVolume(index, useGlobalIndex=True),
             "pan": channels.getChannelPan(index, True),
             "is_muted": channels.isChannelMuted(index, True) == 1,
             "is_solo": channels.isChannelSolo(index, True) == 1,
@@ -1033,7 +1033,7 @@ def handle_channels_set_volume(params: dict) -> dict:
     volume = params.get("volume", 0.8)
     channels.setChannelVolume(index, volume, True)
     return {
-        "volume": channels.getChannelVolume(index, True),
+        "volume": channels.getChannelVolume(index, useGlobalIndex=True),
         "channel_name": channels.getChannelName(index, True),
     }
 

@@ -381,6 +381,12 @@ NOTE_DEFAULTS = {
 EXTENDED_PROPS = ("pan", "color", "slide", "porta")
 _ADD_FIELDS = frozenset({"midi", "note", "duration", *NOTE_DEFAULTS})
 _DELETE_FIELDS = frozenset({"midi", "note", "time"})
+# Fields of a note in piano_roll_state.json: a note read back from the state
+# can be passed to fl_delete_notes as is; they are ignored there.
+_STATE_EXPORT_FIELDS = frozenset({
+    "number", "time_ticks", "duration", "length_ticks", "velocity", "pan", "color",
+    "fcut", "fres", "slide", "porta", "pitchofs", "selected", "muted", "note_name",
+})
 
 NOT_VERIFIED_HINT = (
     "Not verified: nothing reaches FL Studio until fl_trigger_script runs the queue."
@@ -446,7 +452,7 @@ def _validate_notes(notes: object, *, require_duration: bool = True) -> list[dic
     """Validate every note before anything is queued; returns new, normalized dicts."""
     if not isinstance(notes, list) or not notes:
         raise ToolError("No notes provided")
-    allowed = _ADD_FIELDS if require_duration else _DELETE_FIELDS
+    allowed = _ADD_FIELDS if require_duration else _DELETE_FIELDS | _STATE_EXPORT_FIELDS
     normalized = []
     for i, note in enumerate(notes):
         if not isinstance(note, dict):
@@ -480,11 +486,23 @@ def _note_count_text(response: dict) -> str:
     return f" The piano roll now has {count} notes." if count is not None else ""
 
 
-def _checked_response(outcome: dict, notes_sent: list[dict] | None = None) -> tuple[dict, str]:
+def _queued_note_count() -> int:
+    """Notes already waiting in the queue: the next script run adds them too."""
+    return sum(
+        len(r.get("notes") or [])
+        for r in _load_request_queue()
+        if r.get("action") in ("add_notes", "add_chord")
+    )
+
+
+def _checked_response(
+    outcome: dict, notes_sent: list[dict] | None = None, queued_before: int = 0
+) -> tuple[dict, str]:
     """Raise ToolError unless the script provably did what was asked.
 
-    Returns the script's response and a warning suffix ("" when none). With
-    `notes_sent`, the number of notes FL added must match it.
+    Returns the script's response and a text suffix ("" when none). With
+    `notes_sent`, the number of notes FL added must match it plus the
+    `queued_before` notes that earlier calls left in the queue.
     """
     if not outcome["ran"]:
         raise ToolError(outcome["error"])
@@ -502,6 +520,7 @@ def _checked_response(outcome: dict, notes_sent: list[dict] | None = None) -> tu
         raise ToolError(
             f"FL Studio applied {added} added and {deleted} deleted note(s), then "
             f"failed: {response.get('message')}"
+            + (" Requests queued by earlier calls ran in the same batch." if queued_before else "")
         )
     suffix = ""
     if "script_version" not in response:
@@ -510,10 +529,13 @@ def _checked_response(outcome: dict, notes_sent: list[dict] | None = None) -> tu
                 f"{PR_SCRIPT_OUTDATED} The notes were written without pan/color/slide/porta."
             )
         suffix = f" Warning: {PR_SCRIPT_OUTDATED}"
-    if notes_sent is not None and added != len(notes_sent):
+    if notes_sent is not None and added != len(notes_sent) + queued_before:
+        earlier = f" (plus {queued_before} queued earlier)" if queued_before else ""
         raise ToolError(
-            f"Sent {len(notes_sent)} note(s) but FL Studio reports {added} added."
+            f"Sent {len(notes_sent)} note(s){earlier} but FL Studio reports {added} added."
         )
+    if queued_before:
+        suffix = f" {queued_before} note(s) queued earlier were also written.{suffix}"
     return response, suffix
 
 
@@ -555,11 +577,12 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         summary = _summarize_notes(normalized)
 
         with _PR_LOCK:
+            earlier = _queued_note_count()
             _write_request(requests)
             if not auto_trigger:
                 return f"Queued {len(normalized)} note(s): {summary}. {NOT_VERIFIED_HINT}"
             outcome = _run_pr_script()
-        response, warning = _checked_response(outcome, normalized)
+        response, warning = _checked_response(outcome, normalized, earlier)
         return (
             f"{len(normalized)} note(s) written: {summary}."
             f"{_note_count_text(response)}{warning}"
@@ -613,11 +636,12 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         summary = f"{label} at {time:g}, duration {duration:g}"
 
         with _PR_LOCK:
+            earlier = _queued_note_count()
             _write_request({"action": "add_notes", "notes": normalized})
             if not auto_trigger:
                 return f"Queued chord {summary}. {NOT_VERIFIED_HINT}"
             outcome = _run_pr_script()
-        response, warning = _checked_response(outcome, normalized)
+        response, warning = _checked_response(outcome, normalized, earlier)
         return (
             f"{len(normalized)} note(s) written: {summary}."
             f"{_note_count_text(response)}{warning}"

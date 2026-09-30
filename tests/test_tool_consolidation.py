@@ -102,3 +102,18 @@ def test_connection_status_reconnect_resets_first(monkeypatch):
 
     assert calls == ["reset", "ensure"]
     assert status["connected"] is True
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "response"),
+    [
+        ("fl_get_all_mixer_tracks", (), {"success": True, "tracks": []}),
+        ("fl_get_plugin_params", (3,), {"success": True, "params": []}),
+        ("fl_get_all_channels", (), {"success": True, "channels": [{"index": 0, "name": "Kick"}]}),
+    ],
+)
+def test_outdated_controller_is_reported(monkeypatch, tool, args, response):
+    tools = make_tools(monkeypatch, FakeConnection(response))
+
+    with pytest.raises(ToolError, match="controller script .* is outdated"):
+        tools[tool](*args)

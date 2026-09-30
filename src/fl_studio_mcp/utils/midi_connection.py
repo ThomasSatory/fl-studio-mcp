@@ -25,7 +25,7 @@ from typing import Any
 MIDI_PORT_ENV = "FL_STUDIO_MCP_MIDI_PORT"
 
 OUTDATED_CONTROLLER_HINT = (
-    "FL Studio answered without a request id: the FLStudioMCP controller script "
+    "FL Studio answered in an older format: the FLStudioMCP controller script "
     "installed in FL Studio is outdated. Reinstall fl_controller/device_FLStudioMCP.py "
     "(run install.sh or scripts/setup.sh) and restart FL Studio."
 )

@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastmcp.exceptions import ToolError
+
 from fl_studio_mcp.tools.annotations import ACTION, IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils.errors import run
+from fl_studio_mcp.utils.midi_connection import OUTDATED_CONTROLLER_HINT
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -45,6 +48,8 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             "max_params": max_params,
         })
 
+        if "valid" not in result:
+            raise ToolError(OUTDATED_CONTROLLER_HINT)
         keys = ("valid", "name", "param_count", "preset_count", "color", "params")
         return {key: result[key] for key in keys if key in result}
 

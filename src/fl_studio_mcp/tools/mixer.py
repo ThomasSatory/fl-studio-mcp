@@ -8,6 +8,7 @@ from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.annotations import ACTION, IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils.errors import run
+from fl_studio_mcp.utils.midi_connection import OUTDATED_CONTROLLER_HINT
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -51,6 +52,8 @@ def register_mixer_tools(mcp: FastMCP) -> None:
                            True lists every track.
         """
         result = run(get_connection(), "mixer.getAllTracks", {"include_empty": include_empty})
+        if "track_count" not in result:
+            raise ToolError(OUTDATED_CONTROLLER_HINT)
 
         return {"track_count": result.get("track_count"), "tracks": result.get("tracks", [])}
 
