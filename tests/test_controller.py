@@ -234,3 +234,22 @@ def test_channel_volume_is_read_normalized_with_global_index(fl, action, params)
     for call in modules["channels"].getChannelVolume.call_args_list:
         # The 2nd positional argument is `mode` (True = dB), not the index mode.
         assert len(call.args) == 1 and call.kwargs == {"useGlobalIndex": True}, call
+
+
+@pytest.mark.parametrize(
+    ("action", "params", "setter", "value"),
+    [
+        ("channels.setVolume", {"index": 1, "volume": 0.5}, "setChannelVolume", 0.5),
+        ("channels.setPan", {"index": 1, "pan": -0.25}, "setChannelPan", -0.25),
+    ],
+)
+def test_channel_setters_disable_pickup_and_use_global_index(fl, action, params, setter, value):
+    controller, modules = fl
+
+    controller.dispatch_command(action, params)
+
+    # The 3rd positional argument is pickupMode: True (= 1) would enable pickup
+    # and FL could ignore the value; the index must be global, like every tool.
+    getattr(modules["channels"], setter).assert_called_once_with(
+        1, value, modules["midi"].PIM_None, True
+    )
