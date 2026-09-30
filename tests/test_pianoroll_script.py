@@ -51,13 +51,13 @@ def test_partial_failure_reports_counts_and_failures(pr):
     result = script.process_mcp_request()
 
     assert result["status"] == "error"
-    assert result["notes_added"] == 3  # 60, 62, then 64 before the broken note
+    assert result["notes_added"] == 2  # 60 and 62; the broken batch adds nothing, not even 64
     assert result["notes_deleted"] == 1  # later actions still run
     assert result["failures"] == [
         {"index": 1, "action": "add_notes", "message": result["failures"][0]["message"]}
     ]
     assert "action 1 (add_notes)" in result["message"]
-    assert result["note_count"] == len(flp.score.notes) == 2
+    assert result["note_count"] == len(flp.score.notes) == 1
 
 
 def test_unknown_action_is_a_failure(pr):
@@ -111,3 +111,41 @@ def test_apply_writes_response_with_version(pr):
         state = json.load(f)
     assert response["script_version"] == 2
     assert state["noteCount"] == 1
+
+
+def test_times_round_to_the_nearest_tick(pr):
+    script, flp = pr
+    queue(script, [{"action": "add_notes", "notes": [note(60, time=0.1, duration=0.1)]}])
+
+    script.process_mcp_request()
+
+    (added,) = flp.score.notes
+    assert (added.time, added.length) == (10, 10)  # 9.6 ticks, not truncated to 9
+
+
+def test_every_tick_survives_the_state_to_delete_round_trip(pr):
+    script, flp = pr
+    flp.score.PPQ = 960
+    for tick in range(2000):
+        n = flp.Note()
+        n.number, n.time, n.length = 60, tick, 10
+        flp.score.addNote(n)
+    exported = [{"midi": 60, "time": tick / 960} for tick in range(2000)]
+    queue(script, [{"action": "delete_notes", "notes": exported}])
+
+    result = script.process_mcp_request()
+
+    assert result["notes_deleted"] == 2000
+    assert flp.score.notes == []
+
+
+def test_note_shorter_than_a_tick_fails_the_whole_batch(pr):
+    script, flp = pr
+    queue(script, [{"action": "add_notes", "notes": [note(60), note(62, duration=0.001)]}])
+
+    result = script.process_mcp_request()
+
+    assert result["status"] == "error"
+    assert "shorter than one tick" in result["message"]
+    assert result["notes_added"] == 0
+    assert flp.score.notes == []

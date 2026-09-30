@@ -158,3 +158,19 @@ def test_mismatch_accounts_for_notes_queued_earlier(make_tools):
 
     with pytest.raises(ToolError, match="Sent 1 note\\(s\\) \\(plus 1 queued earlier\\).*3 added"):
         tools["fl_send_notes"]([{"midi": 62, "duration": 1}])
+
+
+def test_mismatch_error_keeps_the_outdated_script_warning(make_tools):
+    tools = make_tools({"status": "success", "notes_added": 0, "notes_deleted": 0})
+
+    with pytest.raises(ToolError, match="reports 0 added.*outdated"):
+        tools["fl_send_notes"]([{"midi": 60, "duration": 1}])
+
+
+def test_delete_warns_when_notes_matched_nothing(make_tools):
+    tools = make_tools(v2(notes_deleted=0, note_count=4))
+
+    text = tools["fl_delete_notes"]([{"midi": 60, "time": 0}, {"midi": 64, "time": 1}])
+
+    assert text.startswith("0 note(s) deleted.")
+    assert "Warning: only 0 of 2 requested note(s) matched" in text

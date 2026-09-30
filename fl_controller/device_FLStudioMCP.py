@@ -1191,9 +1191,9 @@ def handle_plugins_get_name(params: dict) -> dict:
     use_global = params.get("use_global", True)
 
     if slot_index >= 0:
-        name = plugins.getPluginName(index, slot_index, True)
+        name = plugins.getPluginName(index, slot_index, useGlobalIndex=True)
     else:
-        name = plugins.getPluginName(index, -1, use_global)
+        name = plugins.getPluginName(index, -1, useGlobalIndex=use_global)
 
     return {"name": name}
 
@@ -1241,17 +1241,19 @@ def handle_plugins_get_params(params: dict) -> dict:
                 "index": i,
                 "name": plugins.getParamName(i, index, slot_index, use_global),
                 "value": plugins.getParamValue(i, index, slot_index, use_global),
-                "value_string": plugins.getParamValueString(i, index, slot_index, use_global),
+                "value_string": plugins.getParamValueString(
+                    i, index, slot_index, useGlobalIndex=use_global
+                ),
             })
         except Exception as e:
             print(f"Warning: could not read param {i}: {e}")
 
     return {
         "valid": True,
-        "name": plugins.getPluginName(index, slot_index, use_global),
+        "name": plugins.getPluginName(index, slot_index, useGlobalIndex=use_global),
         "param_count": param_count,
         "preset_count": plugins.getPresetCount(index, slot_index, use_global),
-        "color": hex(plugins.getColor(index, slot_index, use_global)),
+        "color": hex(plugins.getColor(index, slot_index, useGlobalIndex=use_global)),
         "params": param_list,
     }
 
@@ -1266,11 +1268,15 @@ def handle_plugins_get_param_value(params: dict) -> dict:
     if slot_index >= 0:
         name = plugins.getParamName(param_index, plugin_index, slot_index, True)
         value = plugins.getParamValue(param_index, plugin_index, slot_index, True)
-        value_str = plugins.getParamValueString(param_index, plugin_index, slot_index, True)
+        value_str = plugins.getParamValueString(
+            param_index, plugin_index, slot_index, useGlobalIndex=True
+        )
     else:
         name = plugins.getParamName(param_index, plugin_index, -1, use_global)
         value = plugins.getParamValue(param_index, plugin_index, -1, use_global)
-        value_str = plugins.getParamValueString(param_index, plugin_index, -1, use_global)
+        value_str = plugins.getParamValueString(
+            param_index, plugin_index, -1, useGlobalIndex=use_global
+        )
 
     return {
         "index": param_index,
@@ -1296,12 +1302,16 @@ def handle_plugins_set_param_value(params: dict) -> dict:
         name = plugins.getParamName(param_index, plugin_index, slot_index, True)
         plugins.setParamValue(value, param_index, plugin_index, slot_index, pim_none, True)
         new_value = plugins.getParamValue(param_index, plugin_index, slot_index, True)
-        value_str = plugins.getParamValueString(param_index, plugin_index, slot_index, True)
+        value_str = plugins.getParamValueString(
+            param_index, plugin_index, slot_index, useGlobalIndex=True
+        )
     else:
         name = plugins.getParamName(param_index, plugin_index, -1, use_global)
         plugins.setParamValue(value, param_index, plugin_index, -1, pim_none, use_global)
         new_value = plugins.getParamValue(param_index, plugin_index, -1, use_global)
-        value_str = plugins.getParamValueString(param_index, plugin_index, -1, use_global)
+        value_str = plugins.getParamValueString(
+            param_index, plugin_index, -1, useGlobalIndex=use_global
+        )
 
     return {
         "name": name,
@@ -1331,10 +1341,10 @@ def handle_plugins_next_preset(params: dict) -> dict:
     use_global = params.get("use_global", True)
 
     if slot_index >= 0:
-        plugin_name = plugins.getPluginName(index, slot_index, True)
+        plugin_name = plugins.getPluginName(index, slot_index, useGlobalIndex=True)
         plugins.nextPreset(index, slot_index, True)
     else:
-        plugin_name = plugins.getPluginName(index, -1, use_global)
+        plugin_name = plugins.getPluginName(index, -1, useGlobalIndex=use_global)
         plugins.nextPreset(index, -1, use_global)
 
     return {"plugin_name": plugin_name}
@@ -1347,10 +1357,10 @@ def handle_plugins_prev_preset(params: dict) -> dict:
     use_global = params.get("use_global", True)
 
     if slot_index >= 0:
-        plugin_name = plugins.getPluginName(index, slot_index, True)
+        plugin_name = plugins.getPluginName(index, slot_index, useGlobalIndex=True)
         plugins.prevPreset(index, slot_index, True)
     else:
-        plugin_name = plugins.getPluginName(index, -1, use_global)
+        plugin_name = plugins.getPluginName(index, -1, useGlobalIndex=use_global)
         plugins.prevPreset(index, -1, use_global)
 
     return {"plugin_name": plugin_name}
@@ -1363,8 +1373,8 @@ def handle_plugins_get_color(params: dict) -> dict:
     use_global = params.get("use_global", True)
 
     if slot_index >= 0:
-        color = plugins.getColor(index, slot_index, True)
+        color = plugins.getColor(index, slot_index, useGlobalIndex=True)
     else:
-        color = plugins.getColor(index, -1, use_global)
+        color = plugins.getColor(index, -1, useGlobalIndex=use_global)
 
     return {"color": hex(color)}

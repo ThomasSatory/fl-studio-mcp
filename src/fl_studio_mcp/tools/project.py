@@ -26,8 +26,9 @@ def register_project_tools(mcp: FastMCP) -> None:
         """Get a one-call overview of the open project.
 
         Returns transport state, tempo, the current pattern and the list of
-        used patterns, all channels (name, mute, mixer target) and the mixer
-        tracks in use (name, volume, pan, mute, solo). A section FL Studio
+        used patterns, all channels (name, volume 0-1, pan -1..1, mute, solo,
+        selection, mixer target) and the mixer tracks in use (name, volume,
+        pan, mute, solo). A section FL Studio
         could not read comes back as {"error": ...} while the others stay
         valid. The piano roll is not included: use fl_get_pr_context.
         """

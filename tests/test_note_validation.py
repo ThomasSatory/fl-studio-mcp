@@ -171,3 +171,19 @@ def test_delete_accepts_notes_read_from_the_state(tools, tmp_path):
 def test_delete_still_rejects_typos(tools):
     with pytest.raises(ToolError, match="unknown field\\(s\\) tiem"):
         tools["fl_delete_notes"]([{"midi": 60, "tiem": 0}], auto_trigger=False)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("time", float("nan"), "time must be a number >= 0"),
+        ("time", float("inf"), "time must be a number >= 0"),
+        ("duration", float("nan"), "duration must be a number > 0"),
+        ("duration", float("inf"), "duration must be a number > 0"),
+        ("velocity", float("nan"), "velocity must be a number 0-1"),
+    ],
+)
+def test_non_finite_numbers_are_rejected(field, value, message):
+    note = {"midi": 60, "duration": 1, field: value}
+    with pytest.raises(ToolError, match=f"note 0: {message}"):
+        _validate_notes([note])

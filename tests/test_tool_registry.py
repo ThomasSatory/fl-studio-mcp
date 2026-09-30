@@ -8,7 +8,7 @@ import re
 from fl_studio_mcp.server import mcp
 
 READ_ONLY = {
-    "fl_connection_status", "fl_get_transport_status", "fl_get_song_length", "fl_get_tempo",
+    "fl_get_transport_status", "fl_get_song_length", "fl_get_tempo",
     "fl_get_mixer_track_info", "fl_get_all_mixer_tracks", "fl_get_channel_info",
     "fl_get_all_channels", "fl_get_step_sequence", "fl_get_plugin_params",
     "fl_get_plugin_param_value", "fl_get_piano_roll_state", "fl_get_pr_context",
@@ -16,7 +16,8 @@ READ_ONLY = {
     "fl_get_focused_window", "fl_get_project_snapshot",
 }
 IDEMPOTENT = {
-    "fl_set_song_position", "fl_set_loop_mode", "fl_set_playback_speed", "fl_set_tempo",
+    "fl_connection_status", "fl_set_song_position", "fl_set_loop_mode",
+    "fl_set_playback_speed", "fl_set_tempo",
     "fl_set_track_volume", "fl_set_track_pan", "fl_set_track_name", "fl_set_track_color",
     "fl_set_stereo_separation", "fl_set_channel_volume", "fl_set_channel_pan",
     "fl_set_channel_name", "fl_set_channel_color", "fl_route_channel_to_mixer",

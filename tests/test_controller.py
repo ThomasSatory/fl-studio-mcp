@@ -253,3 +253,32 @@ def test_channel_setters_disable_pickup_and_use_global_index(fl, action, params,
     getattr(modules["channels"], setter).assert_called_once_with(
         1, value, modules["midi"].PIM_None, True
     )
+
+
+PLUGIN_TARGETS = [({"index": 3, "slot_index": 2}, (3, 2)), ({"index": 3}, (3, -1))]
+
+
+@pytest.mark.parametrize(("params", "target"), PLUGIN_TARGETS)
+@pytest.mark.parametrize(
+    "action",
+    ["plugins.getParams", "plugins.getName", "plugins.nextPreset", "plugins.prevPreset",
+     "plugins.getColor", "plugins.getParamValue", "plugins.setParamValue"],
+)
+def test_plugin_calls_pass_the_index_mode_by_keyword(fl, action, params, target):
+    # getPluginName's 3rd argument is userName, getColor's is flag and
+    # getParamValueString's 4th is pickupMode: the index mode must go by keyword.
+    controller, modules = fl
+    plugins = modules["plugins"]
+    plugins.isValid.return_value = True
+    plugins.getParamCount.return_value = 1
+    plugins.getColor.return_value = 0
+
+    controller.dispatch_command(
+        action, {**params, "plugin_index": params["index"], "param_index": 0, "value": 0.5}
+    )
+
+    for name in ("getPluginName", "getColor"):
+        for call in getattr(plugins, name).call_args_list:
+            assert call.args == target and call.kwargs == {"useGlobalIndex": True}, (name, call)
+    for call in plugins.getParamValueString.call_args_list:
+        assert call.args == (0, *target) and call.kwargs == {"useGlobalIndex": True}, call

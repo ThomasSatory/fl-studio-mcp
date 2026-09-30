@@ -454,6 +454,9 @@ are.
 `fl_get_all_mixer_tracks` and `fl_get_plugin_params` now return an object
 instead of a list. Note objects in `fl_send_notes` reject unknown fields;
 `fl_delete_notes` accepts notes copied from `fl_get_piano_roll_state` as is.
+`fl_connect` raised an error when the connection failed;
+`fl_connection_status(reconnect=True)` returns the status instead - check its
+`connected` and `error` fields.
 After updating, rerun `scripts/setup.sh` so FL Studio gets the new controller
 and ComposeWithLLM scripts.
 

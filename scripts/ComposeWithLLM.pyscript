@@ -31,6 +31,25 @@ SCRIPT_VERSION = 2
 NOTE_PROPERTIES = ("pan", "color", "slide", "porta")
 
 
+def _ticks(ppq, quarter_notes):
+    """Quarter notes to ticks, rounded: truncation loses ticks on a state round trip."""
+    return int(round(ppq * quarter_notes))
+
+
+def _build_note(ppq, note_data, start, length):
+    """A flp.Note, or ValueError when it would be shorter than one tick."""
+    if length < 1:
+        raise ValueError("note %s: duration is shorter than one tick (PPQ %d)"
+                         % (note_data.get("midi"), ppq))
+    midi_note = flp.Note()
+    midi_note.number = note_data["midi"]
+    midi_note.time = start
+    midi_note.length = length
+    midi_note.velocity = note_data.get("velocity", 0.8)
+    _apply_note_properties(midi_note, note_data)
+    return midi_note
+
+
 def _apply_note_properties(midi_note, note_data):
     for prop in NOTE_PROPERTIES:
         if prop in note_data:
@@ -215,19 +234,20 @@ def add_chord_to_piano_roll(request):
     Request format:
     {"action": "add_chord", "time": 0, "duration": 1.0,
      "notes": [{"midi": 60}, {"midi": 64, "offset": 0.5}, {"midi": 67, "duration": 2.0}]}
+
+    Every note is built before any is added: a bad note adds nothing.
     """
     added = 0
     try:
         ppq = flp.score.PPQ
-        current_time = int(ppq * request.get("time", 0))
+        chord_time = request.get("time", 0)
         default_duration = request.get("duration", 1.0)
-        for note_data in request.get("notes", []):
-            midi_note = flp.Note()
-            midi_note.number = note_data["midi"]
-            midi_note.time = current_time + int(ppq * note_data.get("offset", 0))
-            midi_note.length = int(ppq * note_data.get("duration", default_duration))
-            midi_note.velocity = note_data.get("velocity", 0.8)
-            _apply_note_properties(midi_note, note_data)
+        built = [
+            _build_note(ppq, n, _ticks(ppq, chord_time + n.get("offset", 0)),
+                        _ticks(ppq, n.get("duration", default_duration)))
+            for n in request.get("notes", [])
+        ]
+        for midi_note in built:
             flp.score.addNote(midi_note)
             added += 1
         return {"status": "success", "notes_added": added}
@@ -244,7 +264,7 @@ def delete_notes_from_piano_roll(request):
     deleted = 0
     try:
         ppq = flp.score.PPQ
-        criteria = [(n["midi"], int(ppq * n.get("time", 0))) for n in request.get("notes", [])]
+        criteria = [(n["midi"], _ticks(ppq, n.get("time", 0))) for n in request.get("notes", [])]
         for i in range(flp.score.noteCount - 1, -1, -1):
             note = flp.score.getNote(i)
             if (note.number, note.time) in criteria:
@@ -262,17 +282,18 @@ def add_notes_to_piano_roll(request):
     {"action": "add_notes", "notes": [
         {"midi": 60, "time": 0, "duration": 1.0, "velocity": 0.8,
          "pan": 0.5, "color": 0, "slide": false, "porta": false}]}
+
+    Every note is built before any is added: a bad note adds nothing.
     """
     added = 0
     try:
         ppq = flp.score.PPQ
-        for note_data in request.get("notes", []):
-            midi_note = flp.Note()
-            midi_note.number = note_data["midi"]
-            midi_note.time = int(ppq * note_data.get("time", note_data.get("offset", 0)))
-            midi_note.length = int(ppq * note_data["duration"])
-            midi_note.velocity = note_data.get("velocity", 0.8)
-            _apply_note_properties(midi_note, note_data)
+        built = [
+            _build_note(ppq, n, _ticks(ppq, n.get("time", n.get("offset", 0))),
+                        _ticks(ppq, n["duration"]))
+            for n in request.get("notes", [])
+        ]
+        for midi_note in built:
             flp.score.addNote(midi_note)
             added += 1
         return {"status": "success", "notes_added": added}

@@ -14,6 +14,7 @@ Communication flow:
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from pathlib import Path
@@ -325,20 +326,9 @@ def _describe_run(run: dict) -> str:
     return f"FL Studio processed the request ({added or 0} note(s) added, {deleted or 0} deleted)."
 
 
-def _enrich_pr_context(context: dict) -> dict:
-    """Fill in what the piano roll runtime cannot report itself.
-
-    The `channels` and `patterns` modules are normally not importable from a
-    piano roll script, so the active pattern and the selected channel are
-    fetched from the controller script over MIDI instead. A failing MIDI bridge
-    must not hide the context the script did deliver.
-    """
-    from fl_studio_mcp.utils.connection import get_connection
-
-    context.pop("selected_channel_error", None)
-    context.pop("current_pattern_error", None)
+def _add_controller_context(conn, context: dict) -> None:
+    """Active pattern, selected channel and piano roll focus, from the controller."""
     try:
-        conn = get_connection()
         if "current_pattern" not in context:
             result = conn.send_command("patterns.getCurrent")
             if result.get("success") and result.get("index") is not None:
@@ -364,6 +354,26 @@ def _enrich_pr_context(context: dict) -> dict:
             context["focused_caption"] = focus.get("caption")
     except Exception as e:  # noqa: BLE001
         context.setdefault("controller_error", str(e))
+
+
+def _enrich_pr_context(context: dict) -> dict:
+    """Fill in what the piano roll runtime cannot report itself.
+
+    The `channels` and `patterns` modules are normally not importable from a
+    piano roll script, so the active pattern and the selected channel are
+    fetched from the controller script over MIDI instead. A failing MIDI bridge
+    must not hide the context the script did deliver.
+    """
+    from fl_studio_mcp.utils.connection import get_connection
+
+    context.pop("selected_channel_error", None)
+    context.pop("current_pattern_error", None)
+    try:
+        conn = get_connection()
+    except Exception as e:  # noqa: BLE001 - keep the script's context regardless
+        context["controller_error"] = str(e)
+    else:
+        _add_controller_context(conn, context)
     context["note"] = (
         "selected_channel is the channel rack selection; an open piano roll does "
         "not follow it when selected via scripting, and FL does not report the "
@@ -394,7 +404,12 @@ NOT_VERIFIED_HINT = (
 
 
 def _is_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """A finite int or float; NaN and infinity would break the script's tick maths."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 def _is_int(value: object) -> bool:
@@ -533,6 +548,7 @@ def _checked_response(
         earlier = f" (plus {queued_before} queued earlier)" if queued_before else ""
         raise ToolError(
             f"Sent {len(notes_sent)} note(s){earlier} but FL Studio reports {added} added."
+            + suffix
         )
     if queued_before:
         suffix = f" {queued_before} note(s) queued earlier were also written.{suffix}"
@@ -617,6 +633,9 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             auto_trigger: run the piano roll script now and verify the result
 
         Example: fl_send_chord("Am7", octave=3, time=0, duration=4)
+
+        A symbol is always read as a chord: "C5" is a C power chord (C, G),
+        not the note C5. For single notes use fl_send_notes.
         """
         if isinstance(chord, str):
             try:
@@ -665,8 +684,15 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
                 return f"Queued deletion of {len(normalized)} note(s). {NOT_VERIFIED_HINT}"
             outcome = _run_pr_script()
         response, warning = _checked_response(outcome)
+        deleted = response.get("notes_deleted") or 0
+        if deleted < len(normalized):
+            warning += (
+                f" Warning: only {deleted} of {len(normalized)} requested note(s) matched; "
+                "pitch and start time must match exactly (read them with "
+                "fl_get_piano_roll_state)."
+            )
         return (
-            f"{response.get('notes_deleted') or 0} note(s) deleted."
+            f"{deleted} note(s) deleted."
             f"{_note_count_text(response)}{warning}"
         )
 
