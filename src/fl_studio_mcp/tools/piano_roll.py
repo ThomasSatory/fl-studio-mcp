@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fastmcp.exceptions import ToolError
+
 from fl_studio_mcp.utils.fl_trigger import get_trigger
 from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
 
@@ -346,10 +348,18 @@ def _midi_to_note_name(midi: int) -> str:
 
 
 def _get_trigger_info(auto_trigger: bool) -> str:
-    """Run the piano roll script (if requested) and return a status suffix."""
+    """Run the piano roll script (if requested); raise when FL Studio did not process it."""
     if not auto_trigger:
         return ""
-    return " " + _describe_run(_run_pr_script())
+    outcome = _run_pr_script()
+    if not outcome["ran"]:
+        raise ToolError(outcome["error"])
+    response = outcome.get("response") or {}
+    if response.get("status") == "error":
+        raise ToolError(
+            f"FL Studio ran the script but it reported an error: {response.get('message')}"
+        )
+    return " " + _describe_run(outcome)
 
 
 def register_piano_roll_tools(mcp: FastMCP) -> None:
@@ -380,14 +390,14 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             ]
         """
         if not notes:
-            return "Error: No notes provided"
+            raise ToolError("No notes provided")
 
         # Validate notes
         for i, note in enumerate(notes):
             if "midi" not in note:
-                return f"Error: Note {i} missing 'midi' field"
+                raise ToolError(f"Note {i} missing 'midi' field")
             if "duration" not in note:
-                return f"Error: Note {i} missing 'duration' field"
+                raise ToolError(f"Note {i} missing 'duration' field")
 
             # Set defaults
             note.setdefault("time", 0)
@@ -441,7 +451,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             fl_send_chord([57, 60, 64, 67], time=2, duration=2.0)
         """
         if not midi_notes:
-            return "Error: No MIDI notes provided"
+            raise ToolError("No MIDI notes provided")
 
         # Build chord notes with velocity included
         chord_notes = [{"midi": midi, "velocity": velocity} for midi in midi_notes]
@@ -468,7 +478,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             [{"midi": 60, "time": 0}, {"midi": 64, "time": 0}]
         """
         if not notes:
-            return "Error: No notes specified for deletion"
+            raise ToolError("No notes specified for deletion")
 
         request = {"action": "delete_notes", "notes": notes}
         _write_request(request)
@@ -503,10 +513,10 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         state = _read_state()
 
         if state is None:
-            return {
-                "error": "No piano roll state available. Make sure FL Studio's "
+            raise ToolError(
+                "No piano roll state available. Make sure FL Studio's "
                 "ComposeWithLLM script has been run at least once."
-            }
+            )
 
         # Add human-readable note names
         if "notes" in state:
@@ -532,10 +542,10 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         This sends the keystroke (Cmd+Opt+Y on macOS, Ctrl+Alt+Y on Windows)
         to FL Studio to execute the ComposeWithLLM piano roll script.
         """
-        run = _run_pr_script()
-        if not run["ran"]:
-            return f"Error: {run['error']}"
-        return _describe_run(run)
+        outcome = _run_pr_script()
+        if not outcome["ran"]:
+            raise ToolError(outcome["error"])
+        return _describe_run(outcome)
 
     @mcp.tool()
     def fl_get_pr_context() -> dict:
@@ -551,28 +561,25 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         run of ComposeWithLLM from the piano roll's Tools > Scripting menu.
         """
         _write_request({"action": "get_context"})
-        run = _run_pr_script()
-        if not run["ran"]:
+        outcome = _run_pr_script()
+        if not outcome["ran"]:
             # Do not let context requests pile up for the next successful trigger.
             _remove_queued_actions("get_context")
-            if run["triggered"]:
+            if outcome["triggered"]:
                 # The generic hint mentions the queue; this request is gone.
-                return {"error": PR_SCRIPT_NOT_RUN_HINT}
-            return {"error": run["error"]}
+                raise ToolError(PR_SCRIPT_NOT_RUN_HINT)
+            raise ToolError(outcome["error"])
 
-        response = run.get("response") or {}
+        response = outcome.get("response") or {}
         if response.get("status") == "error":
-            return {"error": f"Piano roll script error: {response.get('message')}"}
+            raise ToolError(f"Piano roll script error: {response.get('message')}")
         context = response.get("context")
         if not isinstance(context, dict):
-            return {
-                "error": (
-                    "The piano roll script answered without context data. Update "
-                    "ComposeWithLLM.pyscript in FL Studio's 'Piano roll scripts' "
-                    "folder from this repository."
-                ),
-                "raw_response": response,
-            }
+            raise ToolError(
+                "The piano roll script answered without context data. Update "
+                "ComposeWithLLM.pyscript in FL Studio's 'Piano roll scripts' "
+                f"folder from this repository. Raw response: {response!r}"
+            )
         return _enrich_pr_context(context)
 
     @mcp.tool()

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fl_studio_mcp.utils.errors import run
+
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
@@ -32,15 +34,11 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.isValid", {
+        result = run(get_connection(), "plugins.isValid", {
             "index": index,
             "slot_index": slot_index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return False
 
         return result.get("valid", False)
 
@@ -57,15 +55,11 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.getName", {
+        result = run(get_connection(), "plugins.getName", {
             "index": index,
             "slot_index": slot_index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         return result.get("name", "")
 
@@ -82,15 +76,11 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.getParamCount", {
+        result = run(get_connection(), "plugins.getParamCount", {
             "index": index,
             "slot_index": slot_index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return -1
 
         return result.get("count", 0)
 
@@ -109,16 +99,12 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             use_global_index: Whether to use global channel indexing
             max_params: Maximum number of parameters to return (default 50)
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.getParams", {
+        result = run(get_connection(), "plugins.getParams", {
             "index": index,
             "slot_index": slot_index,
             "use_global": use_global_index,
             "max_params": max_params,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return [{"error": result["error"]}]
 
         return result.get("params", [])
 
@@ -137,16 +123,12 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.getParamValue", {
+        result = run(get_connection(), "plugins.getParamValue", {
             "param_index": param_index,
             "plugin_index": plugin_index,
             "slot_index": slot_index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return {"error": result["error"]}
 
         return {
             "index": result.get("index", param_index),
@@ -172,17 +154,13 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.setParamValue", {
+        result = run(get_connection(), "plugins.setParamValue", {
             "param_index": param_index,
             "value": value,
             "plugin_index": plugin_index,
             "slot_index": slot_index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         name = result.get("name", f"Parameter {param_index}")
         new_value = result.get("value", value)
@@ -202,15 +180,11 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.getPresetCount", {
+        result = run(get_connection(), "plugins.getPresetCount", {
             "index": index,
             "slot_index": slot_index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return -1
 
         return result.get("count", 0)
 
@@ -227,15 +201,11 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.nextPreset", {
+        result = run(get_connection(), "plugins.nextPreset", {
             "index": index,
             "slot_index": slot_index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         plugin_name = result.get("plugin_name", "Plugin")
         return f"Switched '{plugin_name}' to next preset"
@@ -253,15 +223,11 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.prevPreset", {
+        result = run(get_connection(), "plugins.prevPreset", {
             "index": index,
             "slot_index": slot_index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         plugin_name = result.get("plugin_name", "Plugin")
         return f"Switched '{plugin_name}' to previous preset"
@@ -279,14 +245,10 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("plugins.getColor", {
+        result = run(get_connection(), "plugins.getColor", {
             "index": index,
             "slot_index": slot_index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         return result.get("color", "0x0")

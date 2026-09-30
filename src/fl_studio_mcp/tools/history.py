@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastmcp.exceptions import ToolError
+
+from fl_studio_mcp.utils.errors import run
+
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
@@ -63,12 +67,11 @@ def register_history_tools(mcp: FastMCP) -> None:
         if unknown:
             # Fail loudly: silently ignoring a flag would create an undo point
             # that does not cover what the caller assumed.
-            return {
-                "error": f"Unknown undo flag(s): {', '.join(unknown)}. "
+            raise ToolError(
+                f"Unknown undo flag(s): {', '.join(unknown)}. "
                 f"Valid flags: {', '.join(UNDO_FLAG_NAMES)}"
-            }
-        conn = get_connection()
-        return conn.send_command("general.saveUndoPoint", {"name": name, "flags": flags})
+            )
+        return run(get_connection(), "general.saveUndoPoint", {"name": name, "flags": flags})
 
     @mcp.tool()
     def fl_undo() -> dict:
@@ -78,17 +81,14 @@ def register_history_tools(mcp: FastMCP) -> None:
         Some scripting mutations (e.g. pattern renames) are not tracked by
         FL's undo system and cannot be reverted this way.
         """
-        conn = get_connection()
-        return conn.send_command("general.undo")
+        return run(get_connection(), "general.undo")
 
     @mcp.tool()
     def fl_redo() -> dict:
         """Redo the last undone change."""
-        conn = get_connection()
-        return conn.send_command("general.redo")
+        return run(get_connection(), "general.redo")
 
     @mcp.tool()
     def fl_get_undo_status() -> dict:
         """Get undo history status (count, position, hints, project-changed flag)."""
-        conn = get_connection()
-        return conn.send_command("general.getUndoStatus")
+        return run(get_connection(), "general.getUndoStatus")

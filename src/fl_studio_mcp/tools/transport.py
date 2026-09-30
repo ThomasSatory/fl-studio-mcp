@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastmcp.exceptions import ToolError
+
+from fl_studio_mcp.utils.errors import run
+
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
@@ -19,11 +23,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
         Toggles between play and pause states. If stopped, starts playback.
         If playing, pauses playback.
         """
-        conn = get_connection()
-        result = conn.send_command("transport.start")
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
+        result = run(get_connection(), "transport.start")
 
         is_playing = result.get("is_playing", False)
         return f"Playback {'started' if is_playing else 'paused'}"
@@ -34,11 +34,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
 
         Stops playback and resets the playback position.
         """
-        conn = get_connection()
-        result = conn.send_command("transport.stop")
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
+        run(get_connection(), "transport.stop")
 
         return "Playback stopped"
 
@@ -48,11 +44,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
 
         When enabled, incoming MIDI and audio will be recorded.
         """
-        conn = get_connection()
-        result = conn.send_command("transport.record")
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
+        result = run(get_connection(), "transport.record")
 
         is_recording = result.get("is_recording", False)
         return f"Recording {'enabled' if is_recording else 'disabled'}"
@@ -64,11 +56,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
         Returns information about whether FL Studio is playing, recording,
         the current position, and loop mode.
         """
-        conn = get_connection()
-        result = conn.send_command("transport.getStatus")
-
-        if not result.get("success", False) and "error" in result:
-            return {"error": result["error"]}
+        result = run(get_connection(), "transport.getStatus")
 
         return {
             "is_playing": result.get("is_playing", False),
@@ -90,14 +78,10 @@ def register_transport_tools(mcp: FastMCP) -> None:
                   3 = Position in ticks
                   4 = Position as bars:steps:ticks (encoded)
         """
-        conn = get_connection()
-        result = conn.send_command("transport.setPosition", {
+        result = run(get_connection(), "transport.setPosition", {
             "position": position,
             "mode": mode,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         new_pos = result.get("position", "")
         return f"Position set to {new_pos}"
@@ -108,11 +92,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
 
         Returns the length in multiple formats for convenience.
         """
-        conn = get_connection()
-        result = conn.send_command("transport.getLength")
-
-        if not result.get("success", False) and "error" in result:
-            return {"error": result["error"]}
+        result = run(get_connection(), "transport.getLength")
 
         return {
             "ticks": result.get("ticks", 0),
@@ -128,13 +108,9 @@ def register_transport_tools(mcp: FastMCP) -> None:
             mode: Either "pattern" or "song"
         """
         if mode not in ("pattern", "song"):
-            return "Error: mode must be 'pattern' or 'song'"
+            raise ToolError("mode must be 'pattern' or 'song'")
 
-        conn = get_connection()
-        result = conn.send_command("transport.setLoopMode", {"mode": mode})
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
+        run(get_connection(), "transport.setLoopMode", {"mode": mode})
 
         return f"Loop mode set to {mode}"
 
@@ -147,12 +123,8 @@ def register_transport_tools(mcp: FastMCP) -> None:
                    1.0 is normal speed.
         """
         if not 0.25 <= speed <= 4.0:
-            return "Error: Speed must be between 0.25 and 4.0"
+            raise ToolError("Speed must be between 0.25 and 4.0")
 
-        conn = get_connection()
-        result = conn.send_command("transport.setPlaybackSpeed", {"speed": speed})
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
+        run(get_connection(), "transport.setPlaybackSpeed", {"speed": speed})
 
         return f"Playback speed set to {speed}x"

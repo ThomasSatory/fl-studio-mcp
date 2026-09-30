@@ -19,6 +19,7 @@ Limitations:
 from __future__ import annotations
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools import (
     register_channel_tools,
@@ -110,7 +111,7 @@ def fl_connect() -> str:
     try:
         conn.ensure_connected()
     except RuntimeError as e:
-        return f"Connection failed: {e}"
+        raise ToolError(f"Connection failed: {e}") from e
     return "Successfully connected to FL Studio via MIDI!"
 
 

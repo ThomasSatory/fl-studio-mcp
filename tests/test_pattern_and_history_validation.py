@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.history import UNDO_FLAG_NAMES, register_history_tools
 from fl_studio_mcp.tools.patterns import _index_error, register_pattern_tools
@@ -51,17 +52,22 @@ def test_index_error_accepts_one_based_indices():
 
 
 def test_pattern_tools_reject_bad_index_before_talking_to_fl(tools):
-    assert tools["fl_select_pattern"](0).startswith("Error")
-    assert tools["fl_rename_pattern"](-2, "Verse").startswith("Error")
-    assert tools["fl_clone_pattern"](0).startswith("Error")
+    with pytest.raises(ToolError, match="positive integer"):
+        tools["fl_select_pattern"](0)
+    with pytest.raises(ToolError, match="positive integer"):
+        tools["fl_rename_pattern"](-2, "Verse")
+    with pytest.raises(ToolError, match="positive integer"):
+        tools["fl_clone_pattern"](0)
 
 
 def test_save_undo_point_rejects_unknown_flags(tools):
-    result = tools["fl_save_undo_point"](flags=["pr", "bogus"])
+    with pytest.raises(ToolError) as excinfo:
+        tools["fl_save_undo_point"](flags=["pr", "bogus"])
 
-    assert "bogus" in result["error"]
+    message = str(excinfo.value)
+    assert "bogus" in message
     for name in UNDO_FLAG_NAMES:
-        assert name in result["error"]
+        assert name in message
 
 
 def test_save_undo_point_flags_default_only_when_omitted(monkeypatch):
