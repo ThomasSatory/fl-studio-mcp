@@ -23,6 +23,7 @@ from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.utils.fl_trigger import FLProbeError, get_trigger
 from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
+from fl_studio_mcp.utils.music import chord_to_midi, midi_to_note_name, note_to_midi
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -365,12 +366,100 @@ def _enrich_pr_context(context: dict) -> dict:
     return context
 
 
-def _midi_to_note_name(midi: int) -> str:
-    """Convert MIDI note number to note name."""
-    note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-    note_name = note_names[midi % 12]
-    octave = (midi // 12) - 1
-    return f"{note_name}{octave}"
+# Defaults of the optional note fields; the script receives every field.
+NOTE_DEFAULTS = {
+    "time": 0.0, "velocity": 0.8, "pan": 0.5, "color": 0, "slide": False, "porta": False,
+}
+# Fields a v1 ComposeWithLLM.pyscript silently ignores.
+EXTENDED_PROPS = ("pan", "color", "slide", "porta")
+_ADD_FIELDS = frozenset({"midi", "note", "duration", *NOTE_DEFAULTS})
+_DELETE_FIELDS = frozenset({"midi", "note", "time"})
+
+NOT_VERIFIED_HINT = (
+    "Not verified: nothing reaches FL Studio until fl_trigger_script runs the queue."
+)
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _normalize_note(i: int, note: dict, require_duration: bool) -> dict:
+    """One validated note with every field filled in; raises ToolError naming note i."""
+
+    def fail(message: str) -> ToolError:
+        return ToolError(f"note {i}: {message}")
+
+    if ("midi" in note) == ("note" in note):
+        raise fail("give exactly one of 'midi' (0-127) or 'note' (e.g. \"C4\", C4 = 60)")
+    if "midi" in note:
+        midi = note["midi"]
+        if not _is_int(midi) or not 0 <= midi <= 127:
+            raise fail(f"midi must be an integer 0-127, got {midi!r}")
+    else:
+        try:
+            midi = note_to_midi(note["note"])
+        except ValueError as e:
+            raise fail(str(e)) from e
+
+    time = note.get("time", NOTE_DEFAULTS["time"])
+    if not _is_number(time) or time < 0:
+        raise fail(f"time must be a number >= 0 (quarter notes), got {time!r}")
+    if not require_duration:
+        return {"midi": midi, "time": float(time)}
+
+    if "duration" not in note:
+        raise fail("missing 'duration' (quarter notes, > 0)")
+    duration = note["duration"]
+    if not _is_number(duration) or duration <= 0:
+        raise fail(f"duration must be a number > 0 (quarter notes), got {duration!r}")
+    out = {"midi": midi, "time": float(time), "duration": float(duration)}
+    for key in ("velocity", "pan"):
+        value = note.get(key, NOTE_DEFAULTS[key])
+        if not _is_number(value) or not 0 <= value <= 1:
+            raise fail(f"{key} must be a number 0-1, got {value!r}")
+        out[key] = float(value)
+    color = note.get("color", NOTE_DEFAULTS["color"])
+    if not _is_int(color) or not 0 <= color <= 15:
+        raise fail(f"color must be an integer 0-15, got {color!r}")
+    out["color"] = color
+    for key in ("slide", "porta"):
+        value = note.get(key, NOTE_DEFAULTS[key])
+        if not isinstance(value, bool):
+            raise fail(f"{key} must be true or false, got {value!r}")
+        out[key] = value
+    return out
+
+
+def _validate_notes(notes: object, *, require_duration: bool = True) -> list[dict]:
+    """Validate every note before anything is queued; returns new, normalized dicts."""
+    if not isinstance(notes, list) or not notes:
+        raise ToolError("No notes provided")
+    allowed = _ADD_FIELDS if require_duration else _DELETE_FIELDS
+    normalized = []
+    for i, note in enumerate(notes):
+        if not isinstance(note, dict):
+            raise ToolError(f"note {i}: expected an object, got {note!r}")
+        unknown = sorted(set(note) - allowed)
+        if unknown:
+            raise ToolError(
+                f"note {i}: unknown field(s) {', '.join(unknown)}; "
+                f"allowed: {', '.join(sorted(allowed))}"
+            )
+        normalized.append(_normalize_note(i, note, require_duration))
+    return normalized
+
+
+def _summarize_notes(notes: list[dict], limit: int = 8) -> str:
+    """'C4@0, E4@0, ... (3 more)' for a tool answer."""
+    text = ", ".join(f"{midi_to_note_name(n['midi'])}@{n['time']:g}" for n in notes[:limit])
+    if len(notes) > limit:
+        text += f", ... ({len(notes) - limit} more)"
+    return text
 
 
 def _get_trigger_info(auto_trigger: bool) -> str:
@@ -393,124 +482,117 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def fl_send_notes(notes: list[dict], mode: str = "add", auto_trigger: bool = True) -> str:
-        """Add or replace notes in the FL Studio piano roll.
+        """Add or replace notes in the open FL Studio piano roll.
 
-        This creates persistent notes in the currently open piano roll pattern.
-        Notes use quarter-note timing for simplicity.
+        Times and durations are in quarter notes. Pitch convention: C4 = 60
+        (FL Studio's own UI labels MIDI 60 as "C5").
 
         Args:
-            notes: List of note objects with properties:
-                   - midi (int): MIDI note number (60 = C4/Middle C)
-                   - duration (float): Length in quarter notes (1.0 = quarter note)
-                   - time (float, optional): Start position in quarter notes (default 0)
-                   - velocity (float, optional): Velocity 0.0-1.0 (default 0.8)
-            mode: "add" to add notes, "replace" to clear existing notes first
-            auto_trigger: Whether to automatically trigger FL Studio (default True)
+            notes: note objects. Each needs exactly one of:
+                   - midi (int 0-127), or
+                   - note (str, e.g. "C4", "F#3", "Bb2")
+                   plus:
+                   - duration (float > 0, quarter notes) - required
+                   - time (float >= 0, quarter notes, default 0)
+                   - velocity (0-1, default 0.8)
+                   - pan (0-1, 0.5 = centre, default 0.5)
+                   - color (int 0-15, FL note colour group, default 0)
+                   - slide (bool, default false), porta (bool, default false)
+                   Unknown fields are rejected.
+            mode: "add" keeps existing notes, "replace" clears the piano roll first
+            auto_trigger: run the piano roll script now and verify the result
+                          (default True); False only queues the request
 
-        Example notes:
-            [
-                {"midi": 60, "duration": 1.0, "time": 0},      # C4 quarter note at beat 0
-                {"midi": 64, "duration": 1.0, "time": 0},      # E4 (chord with C4)
-                {"midi": 67, "duration": 1.0, "time": 0},      # G4 (C major chord)
-                {"midi": 60, "duration": 0.5, "time": 1.0},    # C4 eighth note at beat 1
-            ]
+        Example:
+            [{"note": "C4", "time": 0, "duration": 1},
+             {"midi": 64, "time": 1, "duration": 0.5, "velocity": 0.6}]
         """
-        if not notes:
-            raise ToolError("No notes provided")
-
-        # Validate notes
-        for i, note in enumerate(notes):
-            if "midi" not in note:
-                raise ToolError(f"Note {i} missing 'midi' field")
-            if "duration" not in note:
-                raise ToolError(f"Note {i} missing 'duration' field")
-
-            # Set defaults
-            note.setdefault("time", 0)
-            note.setdefault("velocity", 0.8)
-
-        requests = []
-
-        # If replace mode, clear first
-        if mode == "replace":
-            requests.append({"action": "clear"})
-
-        # Add notes request
-        requests.append({"action": "add_notes", "notes": notes})
+        if mode not in ("add", "replace"):
+            raise ToolError(f"mode must be 'add' or 'replace', got {mode!r}")
+        normalized = _validate_notes(notes)
+        requests = [{"action": "clear"}] if mode == "replace" else []
+        requests.append({"action": "add_notes", "notes": normalized})
+        summary = _summarize_notes(normalized)
 
         with _PR_LOCK:
             _write_request(requests)
-            trigger_info = _get_trigger_info(auto_trigger)
-        note_count = len(notes)
-        note_summary = ", ".join(
-            f"{_midi_to_note_name(n['midi'])}@{n.get('time', 0)}" for n in notes[:5]
-        )
-        if note_count > 5:
-            note_summary += f", ... ({note_count - 5} more)"
-
-        return f"Queued {note_count} note(s): {note_summary}.{trigger_info}"
+            if not auto_trigger:
+                return f"Queued {len(normalized)} note(s): {summary}. {NOT_VERIFIED_HINT}"
+            trigger_info = _get_trigger_info(True)
+        return f"Queued {len(normalized)} note(s): {summary}.{trigger_info}"
 
     @mcp.tool()
     def fl_send_chord(
-        midi_notes: list[int],
+        chord: str | list[int | str],
+        octave: int = 4,
+        inversion: int = 0,
         time: float = 0,
         duration: float = 1.0,
         velocity: float = 0.8,
+        pan: float = 0.5,
+        color: int = 0,
         auto_trigger: bool = True,
     ) -> str:
-        """Add a chord (multiple simultaneous notes) to the FL Studio piano roll.
-
-        This is a convenience function for adding multiple notes at the same time
-        with the same duration. For more control, use fl_send_notes.
+        """Add a chord to the open FL Studio piano roll.
 
         Args:
-            midi_notes: List of MIDI note numbers (e.g., [60, 64, 67] for C major)
-            time: Start position in quarter notes (default 0)
-            duration: Length in quarter notes for all notes (default 1.0)
-            velocity: Velocity 0.0-1.0 for all notes (default 0.8)
-            auto_trigger: Whether to automatically trigger FL Studio
+            chord: a chord symbol such as "Am7", "Cmaj9/E", "F#m7b5", "Dsus4",
+                   or a list of MIDI numbers and/or note names ([57, "C4", "E4"]).
+                   Qualities: maj, m, dim, aug, sus2, sus4, 5, 6, m6, 7, maj7, m7,
+                   mM7, m7b5, dim7, 9, maj9, m9, add9, 11, 13. "/X" adds X as bass.
+            octave: octave of the chord root for a symbol (C4 = 60; FL's UI shows
+                    MIDI 60 as "C5"). Ignored for a list.
+            inversion: raise the n lowest notes an octave (symbol only)
+            time: start in quarter notes (default 0)
+            duration: length in quarter notes (default 1.0)
+            velocity, pan: 0-1 (defaults 0.8 and 0.5)
+            color: FL note colour group 0-15 (default 0)
+            auto_trigger: run the piano roll script now and verify the result
 
-        Example - C major chord at beat 0:
-            fl_send_chord([60, 64, 67], time=0, duration=1.0)
-
-        Example - Am7 chord at beat 2:
-            fl_send_chord([57, 60, 64, 67], time=2, duration=2.0)
+        Example: fl_send_chord("Am7", octave=3, time=0, duration=4)
         """
-        if not midi_notes:
-            raise ToolError("No MIDI notes provided")
-
-        # Build chord notes with velocity included
-        chord_notes = [{"midi": midi, "velocity": velocity} for midi in midi_notes]
-
-        request = {"action": "add_chord", "time": time, "duration": duration, "notes": chord_notes}
+        if isinstance(chord, str):
+            try:
+                pitches: list[int | str] = list(chord_to_midi(chord, octave, inversion))
+            except ValueError as e:
+                raise ToolError(str(e)) from e
+        else:
+            pitches = list(chord)
+        shared = {"time": time, "duration": duration, "velocity": velocity,
+                  "pan": pan, "color": color}
+        normalized = _validate_notes([
+            {"note": p, **shared} if isinstance(p, str) else {"midi": p, **shared}
+            for p in pitches
+        ])
+        names = " ".join(midi_to_note_name(n["midi"]) for n in normalized)
+        label = f"{chord} → {names}" if isinstance(chord, str) else names
+        summary = f"{label} at {time:g}, duration {duration:g}"
 
         with _PR_LOCK:
-            _write_request(request)
-            trigger_info = _get_trigger_info(auto_trigger)
-        note_names = ", ".join(_midi_to_note_name(n) for n in midi_notes)
-        return f"Queued chord [{note_names}] at beat {time}, duration {duration}.{trigger_info}"
+            _write_request({"action": "add_notes", "notes": normalized})
+            if not auto_trigger:
+                return f"Queued chord {summary}. {NOT_VERIFIED_HINT}"
+            trigger_info = _get_trigger_info(True)
+        return f"Queued chord {summary}.{trigger_info}"
 
     @mcp.tool()
     def fl_delete_notes(notes: list[dict], auto_trigger: bool = True) -> str:
-        """Delete specific notes from the FL Studio piano roll.
+        """Delete notes from the open piano roll, matched by pitch and start time.
 
         Args:
-            notes: List of notes to delete, matching by midi and time:
-                   - midi (int): MIDI note number
-                   - time (float): Start position in quarter notes
-            auto_trigger: Whether to automatically trigger FL Studio
+            notes: objects with exactly one of midi (0-127) or note ("C4", C4 = 60),
+                   and time (quarter notes, default 0).
+            auto_trigger: run the piano roll script now and verify the result
 
-        Example:
-            [{"midi": 60, "time": 0}, {"midi": 64, "time": 0}]
+        Example: [{"note": "C4", "time": 0}, {"midi": 64, "time": 0}]
         """
-        if not notes:
-            raise ToolError("No notes specified for deletion")
-
-        request = {"action": "delete_notes", "notes": notes}
+        normalized = _validate_notes(notes, require_duration=False)
         with _PR_LOCK:
-            _write_request(request)
-            trigger_info = _get_trigger_info(auto_trigger)
-        return f"Queued deletion of {len(notes)} note(s).{trigger_info}"
+            _write_request({"action": "delete_notes", "notes": normalized})
+            if not auto_trigger:
+                return f"Queued deletion of {len(normalized)} note(s). {NOT_VERIFIED_HINT}"
+            trigger_info = _get_trigger_info(True)
+        return f"Queued deletion of {len(normalized)} note(s).{trigger_info}"
 
     @mcp.tool()
     def fl_clear_piano_roll(auto_trigger: bool = True) -> str:
@@ -548,7 +630,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         if "notes" in state:
             for note in state["notes"]:
                 if "midi" in note:
-                    note["note_name"] = _midi_to_note_name(note["midi"])
+                    note["note_name"] = midi_to_note_name(note["midi"])
 
         return state
 
