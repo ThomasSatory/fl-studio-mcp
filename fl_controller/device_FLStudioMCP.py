@@ -467,6 +467,45 @@ def handle_general_get_undo_status(params: dict) -> dict:
         return {"error": str(e)}
 
 
+# =============================================================================
+# Project snapshot (one round-trip overview)
+# =============================================================================
+
+
+def _snapshot_patterns() -> dict:
+    listing = handle_patterns_get_all({"include_default": False})
+    if listing.get("error"):
+        raise RuntimeError(listing["error"])
+    counts = handle_patterns_get_count({})
+    if counts.get("error"):
+        raise RuntimeError(counts["error"])
+    return {"current": listing["current"], "count": counts["count"], "items": listing["patterns"]}
+
+
+def handle_project_snapshot(params: dict) -> dict:
+    """Transport, tempo, patterns, channels and mixer tracks in one response.
+
+    Each section is computed on its own; one failing section becomes
+    {"error": ...} without hiding the others.
+    """
+
+    def section(compute):
+        try:
+            return compute()
+        except Exception as e:
+            return {"error": str(e)}
+
+    return {
+        "transport": section(handle_transport_get_status),
+        "tempo": section(mixer.getCurrentTempo),
+        "patterns": section(_snapshot_patterns),
+        "channels": section(lambda: handle_channels_get_all()["channels"]),
+        "mixer_tracks": section(
+            lambda: handle_mixer_get_all_tracks({"include_empty": False})["tracks"]
+        ),
+    }
+
+
 def write_response(response: dict):
     """Write the response file in place.
 
@@ -630,6 +669,9 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_pianoroll_open(params)
     elif action == "plugins.getColor":
         return handle_plugins_get_color(params)
+
+    elif action == "project.snapshot":
+        return handle_project_snapshot(params)
 
     else:
         return {"error": f"Unknown action: {action}"}

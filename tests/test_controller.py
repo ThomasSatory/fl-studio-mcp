@@ -107,3 +107,40 @@ def test_set_tempo_rejects_out_of_range(fl, bpm):
 
     assert "out of range" in result["error"]
     modules["general"].processRECEvent.assert_not_called()
+
+
+def test_snapshot_assembles_all_sections(fl):
+    controller, modules = fl
+    modules["mixer"].getCurrentTempo.return_value = 124.0
+
+    snapshot = controller.dispatch_command("project.snapshot", {})
+
+    assert snapshot["transport"]["is_playing"] is False
+    assert snapshot["tempo"] == 124.0
+    assert snapshot["patterns"] == {
+        "current": 1,
+        "count": 1,
+        "items": [
+            {
+                "index": 1,
+                "name": "Pattern 1",
+                "color": 0,
+                "length_beats": 16,
+                "is_default": False,
+                "is_selected": False,
+            }
+        ],
+    }
+    assert [c["name"] for c in snapshot["channels"]] == ["Kick", "Bass"]
+    assert [t["name"] for t in snapshot["mixer_tracks"]] == ["Master", "Drums"]
+
+
+def test_snapshot_isolates_a_failing_section(fl):
+    controller, modules = fl
+    modules["patterns"].patternMax.side_effect = RuntimeError("patterns API missing")
+
+    snapshot = controller.dispatch_command("project.snapshot", {})
+
+    assert snapshot["patterns"] == {"error": "patterns API missing"}
+    assert snapshot["tempo"] == 120.0
+    assert len(snapshot["channels"]) == 2

@@ -28,6 +28,7 @@ from fl_studio_mcp.tools import (
     register_pattern_tools,
     register_piano_roll_tools,
     register_plugin_tools,
+    register_project_tools,
     register_transport_tools,
     register_ui_tools,
 )
@@ -47,6 +48,8 @@ Available tool categories:
 - Mixer: Volume, pan, mute, solo, track management
 - Channels: Channel info, note triggering, step sequencer
 - Plugins: Parameter control, preset navigation (cannot load new plugins)
+- Project: fl_get_project_snapshot for a one-call overview (transport, tempo,
+  patterns, channels, mixer tracks)
 
 Important limitations:
 1. Cannot load new VST/AU plugins - only control existing ones
@@ -147,6 +150,7 @@ register_piano_roll_tools(mcp)
 register_history_tools(mcp)
 register_pattern_tools(mcp)
 register_ui_tools(mcp)
+register_project_tools(mcp)
 
 
 def main():
