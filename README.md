@@ -516,6 +516,8 @@ are.
 
 The piano roll tools check for an FL Studio process before activating it and never launch it (AppleScript's `activate` would). Start FL Studio yourself, open a piano roll, run ComposeWithLLM once, then retry; a queued request is processed on the next successful trigger.
 
+If the message says *Could not determine whether FL Studio is running*, the check itself failed: on macOS the app running the MCP server (Claude Desktop, a terminal) needs Automation access to System Events in System Settings > Privacy & Security > Automation.
+
 ### "controller script is outdated"
 
 The server only accepts a response that echoes its request id. An older `device_FLStudioMCP.py` answers without one: re-run `scripts/setup.sh` (or copy the file from `fl_controller/`) and restart FL Studio.

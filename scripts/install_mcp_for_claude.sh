@@ -94,6 +94,10 @@ configure_code() {
         print_manual_config
         return 0
     fi
+    if claude mcp get fl-studio >/dev/null 2>&1; then
+        echo "  fl-studio is already registered in Claude Code; re-registering with the current paths."
+        claude mcp remove --scope user fl-studio >/dev/null 2>&1 || true
+    fi
     if claude mcp add --scope user fl-studio -- "$UV_BIN" run --directory "$PROJECT_DIR" fl-studio-mcp; then
         echo -e "  ${GREEN}✓${NC} fl-studio registered in Claude Code (user scope)"
     else

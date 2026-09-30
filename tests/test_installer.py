@@ -28,7 +28,8 @@ def sandbox(tmp_path):
     bindir.mkdir()
     write_exec(bindir / "uv", 'echo "fake uv $@"\n')
     log = tmp_path / "claude.log"
-    write_exec(bindir / "claude", f'echo "$@" >> "{log}"\nexit 0\n')
+    # Fresh machine: `claude mcp get fl-studio` finds nothing (exit 1), everything else succeeds.
+    write_exec(bindir / "claude", f'echo "$@" >> "{log}"\n[ "$2" = get ] && exit 1\nexit 0\n')
     # A closed PATH: only the fakes plus the system binaries the script needs
     # (bash, python3, mkdir...). The real `claude` or `uv` must never be found.
     env = {
@@ -91,15 +92,43 @@ def test_claude_code_goes_through_claude_mcp_add(sandbox):
     proc = run_script(env, "code")
 
     assert proc.returncode == 0, proc.stderr
-    assert log.read_text().strip() == (
+    calls = log.read_text().strip().splitlines()
+    assert calls[-1] == (
         f"mcp add --scope user fl-studio -- {bindir / 'uv'} run --directory {REPO} fl-studio-mcp"
     )
+    assert not any("remove" in call for call in calls)
     assert not (home / ".claude.json").exists()
+
+
+def test_claude_code_rerun_replaces_the_existing_registration(sandbox):
+    home, bindir, log, env = sandbox
+    # Second install: `claude mcp get fl-studio` succeeds, `add` would refuse a duplicate.
+    write_exec(
+        bindir / "claude",
+        f'echo "$@" >> "{log}"\n'
+        'case "$2" in\n'
+        '  add) grep -q "remove" "' + str(log) + '" && exit 0; '
+        'echo "MCP server fl-studio already exists in user config" >&2; exit 1 ;;\n'
+        "esac\nexit 0\n",
+    )
+
+    proc = run_script(env, "code")
+
+    assert proc.returncode == 0, proc.stderr
+    calls = log.read_text().strip().splitlines()
+    assert calls[0] == "mcp get fl-studio"
+    assert calls[1] == "mcp remove --scope user fl-studio"
+    assert calls[2].startswith("mcp add --scope user fl-studio -- ")
+    assert "refused" not in proc.stdout
+    assert "already exists" not in proc.stdout + proc.stderr
 
 
 def test_refused_claude_mcp_add_prints_manual_config(sandbox):
     home, bindir, log, env = sandbox
-    write_exec(bindir / "claude", 'echo "not allowed by enterprise policy" >&2\nexit 1\n')
+    write_exec(
+        bindir / "claude",
+        'case "$2" in add) echo "not allowed by enterprise policy" >&2; exit 1 ;; esac\nexit 1\n',
+    )
 
     proc = run_script(env, "code")
 

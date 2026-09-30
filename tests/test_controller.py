@@ -144,3 +144,26 @@ def test_snapshot_isolates_a_failing_section(fl):
     assert snapshot["patterns"] == {"error": "patterns API missing"}
     assert snapshot["tempo"] == 120.0
     assert len(snapshot["channels"]) == 2
+
+
+def test_duplicate_trigger_for_same_id_is_ignored(fl):
+    """A queued trigger from a timed-out command must not run the current command twice."""
+    controller, modules = fl
+    controller.COMMAND_FILE.write_text(
+        json.dumps({"id": "req7", "action": "transport.start", "params": {}})
+    )
+
+    controller.execute_pending_command()
+    controller.RESPONSE_FILE.unlink()
+    controller.execute_pending_command()  # the late trigger reads the same file again
+
+    modules["transport"].start.assert_called_once()
+    assert not controller.RESPONSE_FILE.exists(), "the first response must not be replaced"
+
+    controller.COMMAND_FILE.write_text(
+        json.dumps({"id": "req8", "action": "transport.start", "params": {}})
+    )
+    controller.execute_pending_command()
+
+    assert modules["transport"].start.call_count == 2
+    assert json.loads(controller.RESPONSE_FILE.read_text())["id"] == "req8"

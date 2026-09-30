@@ -21,15 +21,19 @@ def forbid_subprocess(monkeypatch):
     monkeypatch.setattr(fl_trigger.subprocess, "run", boom)
 
 
+class Probe:
+    def __init__(self, stdout="", returncode=0, stderr=""):
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = stderr
+
+
 def test_is_fl_running_asks_system_events_by_bundle_id(mac_trigger, monkeypatch):
     calls = []
 
-    class Probe:
-        stdout = "true\n"
-
     def fake_run(args, **kwargs):
         calls.append(args)
-        return Probe()
+        return Probe("true\n")
 
     monkeypatch.setattr(fl_trigger.subprocess, "run", fake_run)
 
@@ -39,12 +43,47 @@ def test_is_fl_running_asks_system_events_by_bundle_id(mac_trigger, monkeypatch)
 
 
 def test_is_fl_running_false_when_system_events_says_so(mac_trigger, monkeypatch):
-    class Probe:
-        stdout = "false\n"
-
-    monkeypatch.setattr(fl_trigger.subprocess, "run", lambda *a, **k: Probe())
+    monkeypatch.setattr(fl_trigger.subprocess, "run", lambda *a, **k: Probe("false\n"))
 
     assert mac_trigger.is_fl_running() is False
+
+
+def test_is_fl_running_raises_when_the_probe_itself_fails(mac_trigger, monkeypatch):
+    denied = Probe(
+        returncode=1, stderr="Not authorized to send Apple events to System Events. (-1743)\n"
+    )
+    monkeypatch.setattr(fl_trigger.subprocess, "run", lambda *a, **k: denied)
+
+    with pytest.raises(fl_trigger.FLProbeError, match="Not authorized"):
+        mac_trigger.is_fl_running()
+
+
+def test_run_reports_probe_failure_not_as_fl_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("FL_STUDIO_MCP_SETTINGS_DIR", str(tmp_path))
+
+    class UnknownFL:
+        is_supported = True
+        platform = "Darwin"
+        keystroke = "Cmd+Opt+Y"
+
+        def is_fl_running(self):
+            raise fl_trigger.FLProbeError("Not authorized to send Apple events to System Events")
+
+        def activate_window(self):
+            raise AssertionError("must not activate")
+
+        def trigger(self, delay=0.0):
+            raise AssertionError("must not send a keystroke")
+
+    monkeypatch.setattr(piano_roll, "get_trigger", lambda: UnknownFL())
+
+    outcome = piano_roll._run_pr_script(timeout=0.2)
+
+    assert outcome["triggered"] is False
+    assert outcome["ran"] is False
+    assert not outcome["error"].startswith(piano_roll.PR_FL_NOT_RUNNING)
+    assert "Not authorized" in outcome["error"]
+    assert "Automation" in outcome["error"]
 
 
 def test_activate_does_nothing_when_fl_not_running(mac_trigger, monkeypatch):

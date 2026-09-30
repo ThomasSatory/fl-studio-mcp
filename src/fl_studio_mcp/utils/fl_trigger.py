@@ -20,6 +20,10 @@ TRIGGER_DELAY = 2.0
 FL_BUNDLE_ID = "com.image-line.flstudio"
 
 
+class FLProbeError(RuntimeError):
+    """Whether FL Studio is running could not be determined (not: it is not running)."""
+
+
 class FLStudioTrigger:
     """Handles triggering FL Studio's Piano Roll script via keystrokes.
 
@@ -45,9 +49,14 @@ class FLStudioTrigger:
             self._trigger_func = None
 
     def is_fl_running(self) -> bool:
-        """True when an FL Studio process exists. Never launches it."""
-        try:
-            if self._system == "Darwin":
+        """True when an FL Studio process exists. Never launches it.
+
+        Raises FLProbeError when the question could not be answered (on macOS:
+        osascript failed, typically because this app has no Automation access
+        to System Events). "Unknown" must not be reported as "not running".
+        """
+        if self._system == "Darwin":
+            try:
                 probe = subprocess.run(
                     [
                         "osascript",
@@ -59,7 +68,13 @@ class FLStudioTrigger:
                     text=True,
                     timeout=5,
                 )
-                return probe.stdout.strip() == "true"
+            except Exception as e:
+                raise FLProbeError(f"could not run osascript: {e}") from e
+            if probe.returncode != 0:
+                detail = probe.stderr.strip() or f"osascript exited with {probe.returncode}"
+                raise FLProbeError(detail)
+            return probe.stdout.strip() == "true"
+        try:
             if self._system == "Windows":
                 return self._find_fl_window_windows() is not None
             if self._system == "Linux":
@@ -68,13 +83,20 @@ class FLStudioTrigger:
             return False
         return False
 
+    def _fl_running_or_false(self) -> bool:
+        """is_fl_running() for callers that can only answer yes/no."""
+        try:
+            return self.is_fl_running()
+        except FLProbeError:
+            return False
+
     def _trigger_macos(self) -> bool:
         """Trigger FL Studio on macOS using osascript.
 
         Refuses to act when FL Studio is not running: AppleScript's `activate`
         would launch it.
         """
-        if not self.is_fl_running():
+        if not self._fl_running_or_false():
             return False
         try:
             # Use osascript to send keystroke to FL Studio
@@ -297,7 +319,7 @@ class FLStudioTrigger:
         """
         try:
             if self._system == "Darwin":
-                if not self.is_fl_running():
+                if not self._fl_running_or_false():
                     return False
                 subprocess.run(
                     ["osascript", "-e", f'tell application id "{FL_BUNDLE_ID}" to activate'],

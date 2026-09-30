@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 
-from fl_studio_mcp.utils.fl_trigger import get_trigger
+from fl_studio_mcp.utils.fl_trigger import FLProbeError, get_trigger
 from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
 
 if TYPE_CHECKING:
@@ -117,6 +117,11 @@ PR_SCRIPT_QUEUED_HINT = (
 PR_FL_NOT_RUNNING = (
     "FL Studio is not running. Start it, open a piano roll and run ComposeWithLLM once "
     "from the piano roll's Tools > Scripting menu, then retry."
+)
+PR_FL_PROBE_FAILED = (
+    "Could not determine whether FL Studio is running ({detail}). On macOS, grant "
+    "Automation access to System Events for this app in System Settings > Privacy & "
+    "Security > Automation, then retry."
 )
 
 # Serialises the whole note round-trip (queue write, focus, keystroke, wait).
@@ -230,7 +235,14 @@ def _run_pr_script(timeout: float = PR_SCRIPT_TIMEOUT) -> dict:
             ),
         }
 
-    if not trigger.is_fl_running():
+    try:
+        fl_running = trigger.is_fl_running()
+    except FLProbeError as e:
+        error = PR_FL_PROBE_FAILED.format(detail=e)
+        if _load_request_queue():
+            error += PR_SCRIPT_QUEUED_HINT
+        return {"triggered": False, "ran": False, "response": None, "error": error}
+    if not fl_running:
         error = PR_FL_NOT_RUNNING
         if _load_request_queue():
             error += PR_SCRIPT_QUEUED_HINT

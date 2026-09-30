@@ -85,8 +85,15 @@ def OnIdle():
     pass  # Required FL Studio API hook; no polling needed
 
 
+# Id of the last executed command. A MIDI trigger queued while FL Studio was
+# busy (the server has already timed out and written the next command) reads
+# the current command file; without this guard that command would run twice.
+_last_request_id = None
+
+
 def execute_pending_command():
     """Read command from JSON file, execute it, and write response tagged with its id."""
+    global _last_request_id
     response = {"id": None, "success": False, "error": None}
 
     try:
@@ -96,7 +103,12 @@ def execute_pending_command():
             return
 
         command = json.loads(COMMAND_FILE.read_text())
-        response["id"] = command.get("id")
+        request_id = command.get("id")
+        if request_id is not None and request_id == _last_request_id:
+            # Late trigger for a command that already ran: its response is on disk.
+            return
+        _last_request_id = request_id
+        response["id"] = request_id
 
         action = command.get("action", "")
         params = command.get("params", {})
