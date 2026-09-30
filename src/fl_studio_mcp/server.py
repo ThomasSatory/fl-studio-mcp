@@ -21,6 +21,7 @@ from __future__ import annotations
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp import __version__
 from fl_studio_mcp.tools import (
     register_channel_tools,
     register_history_tools,
@@ -37,6 +38,7 @@ from fl_studio_mcp.utils.connection import get_connection, reset_connection
 # Create the MCP server
 mcp = FastMCP(
     name="fl-studio-mcp",
+    version=__version__,
     instructions="""
 FL Studio MCP Server - Control FL Studio from AI assistants.
 

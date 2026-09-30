@@ -119,7 +119,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
 .\install.ps1
 ```
 
-`install.ps1` is the Windows counterpart to `install.sh` — same steps, PowerShell instead of bash, and it installs Python 3.12 specifically (required for prebuilt `python-rtmidi` wheels on Windows).
+`install.ps1` is the Windows counterpart to `install.sh` — same steps, PowerShell instead of bash, and it installs Python 3.12 specifically (required for prebuilt `python-rtmidi` wheels on Windows). It has not been updated for the `--client`/`--yes` options or the absolute `uv` path.
 
 Both installers will:
 
@@ -234,6 +234,19 @@ Or for Claude Code, add to your MCP settings (`~/.claude.json`, or run `claude m
 
 Using a different MCP-compatible client (Gemini, an OpenAI-based tool, Cursor, etc.)? The same `command`/`args` pair above is all any MCP host needs — add it to that client's own MCP config in whatever format it expects. See [Which AI Clients Work With This?](#which-ai-clients-work-with-this) for what's actually been tested.
 
+### Configuration (environment variables)
+
+| Variable | Purpose |
+|---|---|
+| `FL_STUDIO_MCP_MIDI_PORT` | Name (or case-insensitive substring) of the MIDI output port to use. Without it the server only accepts a port containing `IAC`, `loopMIDI` or `Midi Through`, and refuses to send anything to another device (a hardware synth would otherwise receive the trigger note). |
+| `FL_STUDIO_MCP_SETTINGS_DIR` | FL Studio's `Settings` folder when it is not the default (Options > File settings > User data folder). |
+
+On a French macOS the IAC bus is called `Gestionnaire IAC Bus 1`; it contains `IAC`, so it is picked up automatically.
+
+`./install.sh --client desktop|code|both|none --yes` runs without prompts. Claude Code is configured through `claude mcp add`; if your organisation forbids local MCP servers the script prints the configuration to apply by hand. The Claude Desktop entry carries uv's absolute path because GUI apps do not inherit the shell PATH.
+
+Tool failures (FL Studio not reachable, invalid argument, script that did not run) are reported as MCP errors (`isError`), not as text starting with "Error:".
+
 ## Linux (FL Studio under Wine)
 
 The MCP server runs natively on Linux and drives FL Studio running under
@@ -327,6 +340,8 @@ retarget it before writing notes to a specific channel.
 | `fl_get_song_length` | Get song duration |
 | `fl_set_loop_mode` | Switch between pattern/song mode |
 | `fl_set_playback_speed` | Adjust playback speed (0.25x-4x) |
+| `fl_get_tempo` | Get the project tempo (BPM) |
+| `fl_set_tempo` | Set the project tempo (10-522 BPM), verified by reading it back |
 
 ### Mixer
 
@@ -381,6 +396,12 @@ retarget it before writing notes to a specific channel.
 | `fl_next_preset` | Next preset |
 | `fl_prev_preset` | Previous preset |
 | `fl_get_plugin_color` | Get plugin color |
+
+### Project
+
+| Tool | Description |
+|------|-------------|
+| `fl_get_project_snapshot` | Transport, tempo, patterns, channels and mixer tracks in one call |
 
 ### Windows / focus
 
@@ -491,6 +512,14 @@ are.
 5. On Linux: `xdotool` must be installed and the session must be X11 - on Wayland, run the script manually from Tools > Scripting
 6. If you just updated the server code (e.g. pulled a fix to the trigger logic), **fully restart** your MCP client (Claude Desktop/Code) — reconnecting the MCP server alone does not respawn the underlying process, so it can keep running stale code
 
+### "FL Studio is not running"
+
+The piano roll tools check for an FL Studio process before activating it and never launch it (AppleScript's `activate` would). Start FL Studio yourself, open a piano roll, run ComposeWithLLM once, then retry; a queued request is processed on the next successful trigger.
+
+### "controller script is outdated"
+
+The server only accepts a response that echoes its request id. An older `device_FLStudioMCP.py` answers without one: re-run `scripts/setup.sh` (or copy the file from `fl_controller/`) and restart FL Studio.
+
 ### No MIDI ports available
 
 - **macOS**: Enable IAC Driver in Audio MIDI Setup
@@ -524,6 +553,8 @@ This MCP server uses a hybrid approach:
 ```
 
 ### How It Works
+
+Every command carries a request id and the server ignores any response that does not echo it, so a late answer to a timed-out command can never be mistaken for the current one. Commands are serialised (one at a time), and the command file is written atomically on the server side; FL Studio writes its response in place (its embedded Python cannot rename files safely).
 
 1. **Transport/Mixer/Channels/Plugins**:
    - MCP server writes command to JSON file

@@ -16,6 +16,22 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Options: --client desktop|code|both|none, --yes (no prompts)
+FL_MCP_CLIENT=""
+FL_MCP_YES=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --client) FL_MCP_CLIENT="$2"; shift 2 ;;
+        --client=*) FL_MCP_CLIENT="${1#*=}"; shift ;;
+        --yes|-y) FL_MCP_YES="1"; shift ;;
+        -h|--help)
+            echo "Usage: ./install.sh [--client desktop|code|both|none] [--yes]"
+            exit 0 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+export FL_MCP_CLIENT FL_MCP_YES
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -43,6 +59,8 @@ if ! command -v uv &> /dev/null; then
     fi
 fi
 echo -e "${GREEN}✓${NC} uv is installed"
+UV_BIN="$(command -v uv)"
+export UV_BIN
 
 # Step 2: Install Python dependencies (3.12 — matches PyPI wheels for python-rtmidi on Windows)
 echo ""
