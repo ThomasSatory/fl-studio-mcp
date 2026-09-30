@@ -49,11 +49,11 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 ### Piano Roll Control
 
-- **Add notes** to the piano roll with precise timing
-- **Add chords** with a single command
-- **Delete specific notes** by MIDI number and time
-- **Clear all notes** from the piano roll
-- **Read piano roll state** to see all existing notes
+- **Add notes** by MIDI number or name (`"C4"`, `"F#3"`, `"Bb2"` — C4 = 60; FL Studio's UI shows MIDI 60 as "C5")
+- **Add chords** by symbol (`"Am7"`, `"Cmaj9/E"`, `"F#m7b5"`) with octave and inversion, or as a list of notes
+- Per-note velocity, pan, colour group, slide and portamento
+- **Delete specific notes**, **clear** the piano roll, **read** its state
+- Every write is verified: the tool reports how many notes FL Studio applied and fails loudly otherwise
 - Auto-triggering via keystroke (Cmd+Opt+Y on macOS, Ctrl+Alt+Y on Windows/Linux)
 
 ## Important Limitations
@@ -61,10 +61,6 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 ### Cannot Load Plugins
 
 The FL Studio scripting API does **not** support loading new VST/AU plugins. You can only control parameters of plugins that are already loaded in your project.
-
-### Cannot Create Patterns
-
-There is no API to programmatically create new patterns. You can only work with existing patterns.
 
 ## Requirements
 
@@ -325,8 +321,7 @@ retarget it before writing notes to a specific channel.
 
 | Tool | Description |
 |------|-------------|
-| `fl_connect` | Connect/reconnect to FL Studio |
-| `fl_connection_status` | Get connection status |
+| `fl_connection_status` | Connection status; reconnect=True to reconnect |
 
 ### Transport
 
@@ -347,9 +342,8 @@ retarget it before writing notes to a specific channel.
 
 | Tool | Description |
 |------|-------------|
-| `fl_get_mixer_track_count` | Get number of mixer tracks |
 | `fl_get_mixer_track_info` | Get track details |
-| `fl_get_all_mixer_tracks` | List all tracks |
+| `fl_get_all_mixer_tracks` | Track count and used tracks |
 | `fl_set_track_volume` | Set track volume |
 | `fl_set_track_pan` | Set track pan |
 | `fl_mute_track` | Mute/unmute track |
@@ -363,12 +357,9 @@ retarget it before writing notes to a specific channel.
 
 | Tool | Description |
 |------|-------------|
-| `fl_get_channel_count` | Get number of channels |
 | `fl_get_channel_info` | Get channel details |
-| `fl_get_all_channels` | List all channels |
-| `fl_get_selected_channel` | Get selected channel |
-| `fl_select_channel` | Select/deselect channel |
-| `fl_select_one_channel` | Select channel exclusively |
+| `fl_get_all_channels` | List channels (volume, pan, mute, solo, selection, mixer target) |
+| `fl_select_channel` | Select/deselect a channel; exclusive=True deselects the others |
 | `fl_trigger_note` | Trigger MIDI note (real-time) |
 | `fl_set_channel_volume` | Set channel volume |
 | `fl_set_channel_pan` | Set channel pan |
@@ -377,7 +368,6 @@ retarget it before writing notes to a specific channel.
 | `fl_set_channel_name` | Rename channel |
 | `fl_set_channel_color` | Set channel color |
 | `fl_route_channel_to_mixer` | Route to mixer track |
-| `fl_get_grid_bit` | Get step sequencer step |
 | `fl_set_grid_bit` | Set step sequencer step |
 | `fl_get_step_sequence` | Get full pattern |
 | `fl_set_step_sequence` | Set full pattern |
@@ -386,16 +376,11 @@ retarget it before writing notes to a specific channel.
 
 | Tool | Description |
 |------|-------------|
-| `fl_is_plugin_valid` | Check if plugin exists |
-| `fl_get_plugin_name` | Get plugin name |
-| `fl_get_plugin_param_count` | Get parameter count |
-| `fl_get_plugin_params` | List all parameters |
+| `fl_get_plugin_params` | Plugin name, validity, presets, colour and parameters |
 | `fl_get_plugin_param_value` | Get parameter value |
 | `fl_set_plugin_param_value` | Set parameter value |
-| `fl_get_preset_count` | Get preset count |
 | `fl_next_preset` | Next preset |
 | `fl_prev_preset` | Previous preset |
-| `fl_get_plugin_color` | Get plugin color |
 
 ### Project
 
@@ -417,8 +402,7 @@ retarget it before writing notes to a specific channel.
 
 | Tool | Description |
 |------|-------------|
-| `fl_list_patterns` | List patterns (name, color, length, selection) |
-| `fl_get_current_pattern` | Get the active pattern |
+| `fl_list_patterns` | List patterns and the active one |
 | `fl_select_pattern` | Select/activate a pattern |
 | `fl_new_pattern` | Switch to the next empty pattern (automation-safe) |
 | `fl_clone_pattern` | Clone a pattern (closes the piano roll - FL behaviour) |
@@ -444,8 +428,8 @@ are.
 
 | Tool | Description |
 |------|-------------|
-| `fl_send_notes` | Add notes to the piano roll |
-| `fl_send_chord` | Add a chord (multiple notes at same time) |
+| `fl_send_notes` | Add notes by MIDI number or name (C4 = 60), with velocity, pan, colour, slide, porta |
+| `fl_send_chord` | Add a chord by symbol ("Am7", "Cmaj9/E") or list of notes |
 | `fl_delete_notes` | Delete specific notes |
 | `fl_clear_piano_roll` | Clear all notes |
 | `fl_get_piano_roll_state` | Read current piano roll notes |
@@ -453,6 +437,22 @@ are.
 | `fl_trigger_script` | Manually trigger the FL Studio script |
 | `fl_get_piano_roll_info` | Get piano roll system info |
 | `fl_clear_request_queue` | Cancel pending queued changes |
+
+### Removed in 0.3.0
+
+| Removed | Use instead |
+|---|---|
+| `fl_connect` | `fl_connection_status(reconnect=True)` |
+| `fl_get_channel_count`, `fl_get_selected_channel` | `fl_get_all_channels` |
+| `fl_select_one_channel` | `fl_select_channel(index, exclusive=True)` |
+| `fl_get_grid_bit` | `fl_get_step_sequence` |
+| `fl_get_mixer_track_count` | `fl_get_all_mixer_tracks` (`track_count`) |
+| `fl_is_plugin_valid`, `fl_get_plugin_name`, `fl_get_plugin_param_count`, `fl_get_preset_count`, `fl_get_plugin_color` | `fl_get_plugin_params` |
+| `fl_get_current_pattern` | `fl_list_patterns` (`current`) |
+
+`fl_send_chord` now takes `chord` (symbol or list) instead of `midi_notes`.
+After updating, rerun `scripts/setup.sh` so FL Studio gets the new controller
+and ComposeWithLLM scripts.
 
 ## Example Workflows
 

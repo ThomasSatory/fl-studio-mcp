@@ -1,19 +1,14 @@
 """FL Studio MCP Server - Control FL Studio via Model Context Protocol.
 
-This MCP server provides tools to control FL Studio through two mechanisms:
-1. MIDI + JSON - Real-time control of mixer, transport, channels, and plugins
-2. Piano Roll Scripts - Persistent note placement via JSON + keystroke triggering
+Two channels to FL Studio:
+1. MIDI + JSON files - transport, mixer, channels, plugins, patterns, undo,
+   windows (controller script device_FLStudioMCP.py)
+2. Piano roll script - persistent notes via JSON files + a trigger keystroke
+   (ComposeWithLLM.pyscript)
 
-Requirements:
-- FL Studio 20.7+ running
-- FLStudioMCP controller script installed (run: ./scripts/setup_mac.sh)
-- On Mac: IAC Driver enabled in Audio MIDI Setup
-- On Windows: loopMIDI virtual MIDI ports configured
-- For piano roll: ComposeWithLLM.pyscript installed in FL Studio
-
-Limitations:
-- Cannot load new plugins (only control existing ones)
-- Cannot create new patterns programmatically
+Requirements: FL Studio 20.7+ running with the FLStudioMCP controller enabled
+on a virtual MIDI port (IAC Driver on macOS, loopMIDI on Windows); both
+scripts installed by scripts/setup.sh.
 """
 
 from __future__ import annotations
@@ -40,25 +35,40 @@ mcp = FastMCP(
     name="fl-studio-mcp",
     version=__version__,
     instructions="""
-FL Studio MCP Server - Control FL Studio from AI assistants.
+FL Studio MCP Server - control a running FL Studio from an AI assistant.
 
-This server provides tools to control FL Studio through its Python scripting API.
-FL Studio must be running with the FLStudioMCP MIDI controller enabled.
+Start with fl_get_project_snapshot: transport, tempo, patterns, channels and
+mixer tracks in one call. If a tool reports no connection, call
+fl_connection_status(reconnect=True).
 
-Available tool categories:
-- Transport: Play, stop, record, tempo, position control
-- Mixer: Volume, pan, mute, solo, track management
-- Channels: Channel info, note triggering, step sequencer
-- Plugins: Parameter control, preset navigation (cannot load new plugins)
-- Project: fl_get_project_snapshot for a one-call overview (transport, tempo,
-  patterns, channels, mixer tracks)
+Domains:
+- Transport and tempo: play/stop/record, position, loop mode, speed, tempo
+- Mixer: track volume, pan, mute, solo, arm, name, colour, stereo separation
+- Channels: channel rack properties, mixer routing, step sequencer
+  (fl_set_step_sequence / fl_set_grid_bit for persistent drum steps)
+- Plugins: fl_get_plugin_params describes a plugin and its parameters;
+  parameter values and preset navigation. Loading new plugins is impossible.
+- Piano roll: fl_send_notes, fl_send_chord ("Am7", "Cmaj9/E"),
+  fl_delete_notes, fl_clear_piano_roll, fl_get_piano_roll_state,
+  fl_get_pr_context
+- Patterns: list, select, create empty, clone, rename (FL Studio 2024+)
+- Undo: fl_save_undo_point before a batch of edits, fl_undo, fl_redo
+- Windows: show, hide, focus; fl_open_piano_roll(channel) targets a channel
 
-Important limitations:
-1. Cannot load new VST/AU plugins - only control existing ones
-2. Cannot create new patterns programmatically
-3. Note triggering (fl_trigger_note) is real-time only - notes won't persist
-   unless FL Studio is recording. Use step sequencer (fl_set_grid_bit) for
-   persistent drum patterns.
+Piano roll rules:
+- A piano roll window must be open, and ComposeWithLLM must have been run
+  once by hand in this FL Studio session (piano roll > Tools > Scripting).
+- Call fl_open_piano_roll(channel) first to choose which channel the notes
+  go to; the piano roll does not follow channel selection made by scripting.
+- Times and durations are in quarter notes (1.0 = one beat in 4/4).
+- Pitch names use C4 = 60. FL Studio's own UI labels MIDI 60 as "C5", so a
+  note written as "A3" appears as "A4" in FL.
+- The note tools verify what FL Studio applied and raise on any failure.
+
+Limits:
+- fl_trigger_note plays a note in real time only; it is not recorded unless
+  FL Studio is recording.
+- FL's undo does not track every scripting change (pattern renames).
 """,
 )
 

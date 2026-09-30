@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from fl_studio_mcp.server import mcp
 
@@ -72,3 +73,14 @@ def test_annotation_classes():
         assert hints(tools[name])[:2] == (False, True), name
     for name in ACTION:
         assert hints(tools[name]) == (False, False, False), name
+
+
+def test_instructions_match_the_tool_set():
+    text = mcp.instructions
+    assert "Cannot create new patterns" not in text
+    assert "C4 = 60" in text and "C5" in text
+    for name in ("fl_get_project_snapshot", "fl_open_piano_roll", "fl_send_chord",
+                 "fl_save_undo_point", "fl_connection_status"):
+        assert name in text, name
+    for name in REMOVED:
+        assert not re.search(rf"\b{name}\b", text), name
