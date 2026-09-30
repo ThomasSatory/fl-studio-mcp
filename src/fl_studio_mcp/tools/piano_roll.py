@@ -14,6 +14,7 @@ Communication flow:
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -113,6 +114,13 @@ PR_SCRIPT_QUEUED_HINT = (
     " The request is still queued and will be processed on the next successful "
     "trigger; cancel it with fl_clear_request_queue."
 )
+PR_FL_NOT_RUNNING = (
+    "FL Studio is not running. Start it, open a piano roll and run ComposeWithLLM once "
+    "from the piano roll's Tools > Scripting menu, then retry."
+)
+
+# Serialises the whole note round-trip (queue write, focus, keystroke, wait).
+_PR_LOCK = threading.Lock()
 
 
 def _not_run_error() -> str:
@@ -221,6 +229,12 @@ def _run_pr_script(timeout: float = PR_SCRIPT_TIMEOUT) -> dict:
                 f"Press {trigger.keystroke} in the piano roll manually."
             ),
         }
+
+    if not trigger.is_fl_running():
+        error = PR_FL_NOT_RUNNING
+        if _load_request_queue():
+            error += PR_SCRIPT_QUEUED_HINT
+        return {"triggered": False, "ran": False, "response": None, "error": error}
 
     # Remove a stale response BEFORE triggering: the script answers within
     # milliseconds, so deleting it after the keystroke would discard the
@@ -412,9 +426,9 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         # Add notes request
         requests.append({"action": "add_notes", "notes": notes})
 
-        _write_request(requests)
-
-        trigger_info = _get_trigger_info(auto_trigger)
+        with _PR_LOCK:
+            _write_request(requests)
+            trigger_info = _get_trigger_info(auto_trigger)
         note_count = len(notes)
         note_summary = ", ".join(
             f"{_midi_to_note_name(n['midi'])}@{n.get('time', 0)}" for n in notes[:5]
@@ -458,9 +472,9 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
 
         request = {"action": "add_chord", "time": time, "duration": duration, "notes": chord_notes}
 
-        _write_request(request)
-
-        trigger_info = _get_trigger_info(auto_trigger)
+        with _PR_LOCK:
+            _write_request(request)
+            trigger_info = _get_trigger_info(auto_trigger)
         note_names = ", ".join(_midi_to_note_name(n) for n in midi_notes)
         return f"Queued chord [{note_names}] at beat {time}, duration {duration}.{trigger_info}"
 
@@ -481,9 +495,9 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             raise ToolError("No notes specified for deletion")
 
         request = {"action": "delete_notes", "notes": notes}
-        _write_request(request)
-
-        trigger_info = _get_trigger_info(auto_trigger)
+        with _PR_LOCK:
+            _write_request(request)
+            trigger_info = _get_trigger_info(auto_trigger)
         return f"Queued deletion of {len(notes)} note(s).{trigger_info}"
 
     @mcp.tool()
@@ -494,9 +508,9 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             auto_trigger: Whether to automatically trigger FL Studio
         """
         request = {"action": "clear"}
-        _write_request(request)
-
-        trigger_info = _get_trigger_info(auto_trigger)
+        with _PR_LOCK:
+            _write_request(request)
+            trigger_info = _get_trigger_info(auto_trigger)
         return f"Queued clear all notes.{trigger_info}"
 
     @mcp.tool()
@@ -542,7 +556,8 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         This sends the keystroke (Cmd+Opt+Y on macOS, Ctrl+Alt+Y on Windows)
         to FL Studio to execute the ComposeWithLLM piano roll script.
         """
-        outcome = _run_pr_script()
+        with _PR_LOCK:
+            outcome = _run_pr_script()
         if not outcome["ran"]:
             raise ToolError(outcome["error"])
         return _describe_run(outcome)
@@ -560,11 +575,13 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         Requires an open piano roll and, once per FL Studio session, a manual
         run of ComposeWithLLM from the piano roll's Tools > Scripting menu.
         """
-        _write_request({"action": "get_context"})
-        outcome = _run_pr_script()
+        with _PR_LOCK:
+            _write_request({"action": "get_context"})
+            outcome = _run_pr_script()
+            if not outcome["ran"]:
+                # Do not let context requests pile up for the next successful trigger.
+                _remove_queued_actions("get_context")
         if not outcome["ran"]:
-            # Do not let context requests pile up for the next successful trigger.
-            _remove_queued_actions("get_context")
             if outcome["triggered"]:
                 # The generic hint mentions the queue; this request is gone.
                 raise ToolError(PR_SCRIPT_NOT_RUN_HINT)
