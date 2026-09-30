@@ -14,6 +14,15 @@ from typing import Callable
 # Delay after triggering to allow FL Studio to process
 TRIGGER_DELAY = 2.0
 
+# Bundle identifier of FL Studio on macOS; the app bundle is named after the
+# version ("FL Studio 2025.app") and its process is "OsxFL", so neither name
+# is a reliable way to address it.
+FL_BUNDLE_ID = "com.image-line.flstudio"
+
+
+class FLProbeError(RuntimeError):
+    """Whether FL Studio is running could not be determined (not: it is not running)."""
+
 
 class FLStudioTrigger:
     """Handles triggering FL Studio's Piano Roll script via keystrokes.
@@ -39,17 +48,65 @@ class FLStudioTrigger:
         else:
             self._trigger_func = None
 
+    def is_fl_running(self) -> bool:
+        """True when an FL Studio process exists. Never launches it.
+
+        Raises FLProbeError when the question could not be answered (on macOS:
+        osascript failed, typically because this app has no Automation access
+        to System Events). "Unknown" must not be reported as "not running".
+        """
+        if self._system == "Darwin":
+            try:
+                probe = subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        'tell application "System Events" to (exists (processes whose '
+                        f'bundle identifier is "{FL_BUNDLE_ID}"))',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except Exception as e:
+                raise FLProbeError(f"could not run osascript: {e}") from e
+            if probe.returncode != 0:
+                detail = probe.stderr.strip() or f"osascript exited with {probe.returncode}"
+                raise FLProbeError(detail)
+            return probe.stdout.strip() == "true"
+        try:
+            if self._system == "Windows":
+                return self._find_fl_window_windows() is not None
+            if self._system == "Linux":
+                return bool(self._find_fl_windows_linux())
+        except Exception:
+            return False
+        return False
+
+    def _fl_running_or_false(self) -> bool:
+        """is_fl_running() for callers that can only answer yes/no."""
+        try:
+            return self.is_fl_running()
+        except FLProbeError:
+            return False
+
     def _trigger_macos(self) -> bool:
-        """Trigger FL Studio on macOS using osascript."""
+        """Trigger FL Studio on macOS using osascript.
+
+        Refuses to act when FL Studio is not running: AppleScript's `activate`
+        would launch it.
+        """
+        if not self._fl_running_or_false():
+            return False
         try:
             # Use osascript to send keystroke to FL Studio
-            script = '''
-            tell application "FL Studio"
+            script = f'''
+            tell application id "{FL_BUNDLE_ID}"
                 activate
             end tell
             delay 0.3
             tell application "System Events"
-                keystroke "y" using {command down, option down}
+                keystroke "y" using {{command down, option down}}
             end tell
             '''
             subprocess.run(
@@ -73,7 +130,7 @@ class FLStudioTrigger:
 
             # Focus FL Studio first
             subprocess.run(
-                ["osascript", "-e", 'tell application "FL Studio" to activate'],
+                ["osascript", "-e", f'tell application id "{FL_BUNDLE_ID}" to activate'],
                 capture_output=True,
                 timeout=5,
             )
@@ -91,17 +148,8 @@ class FLStudioTrigger:
         except Exception:
             return False
 
-    def _focus_fl_studio_windows(self) -> bool:
-        """Bring the FL Studio window to the foreground on Windows.
-
-        The keystroke that triggers the ComposeWithLLM script is delivered to
-        whichever window has focus, so FL Studio must be foregrounded first
-        (mirroring the ``activate`` step used on macOS). Uses only ctypes/user32
-        so no extra dependency is required.
-
-        Returns:
-            True if an FL Studio window was found and foregrounded, else False.
-        """
+    def _find_fl_window_windows(self):
+        """Return the handle of a visible FL Studio window on Windows, or None."""
         try:
             import ctypes
             from ctypes import wintypes
@@ -129,9 +177,28 @@ class FLStudioTrigger:
                 return True
 
             user32.EnumWindows(EnumWindowsProc(_enum), 0)
+            return found["hwnd"] or None
+        except Exception:
+            return None
 
-            hwnd = found["hwnd"]
-            if not hwnd:
+    def _focus_fl_studio_windows(self) -> bool:
+        """Bring the FL Studio window to the foreground on Windows.
+
+        The keystroke that triggers the ComposeWithLLM script is delivered to
+        whichever window has focus, so FL Studio must be foregrounded first
+        (mirroring the ``activate`` step used on macOS). Uses only ctypes/user32
+        so no extra dependency is required.
+
+        Returns:
+            True if an FL Studio window was found and foregrounded, else False.
+        """
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+
+            hwnd = self._find_fl_window_windows()
+            if hwnd is None:
                 return False
 
             # Restore if minimized, then foreground it.
@@ -252,8 +319,10 @@ class FLStudioTrigger:
         """
         try:
             if self._system == "Darwin":
+                if not self._fl_running_or_false():
+                    return False
                 subprocess.run(
-                    ["osascript", "-e", 'tell application "FL Studio" to activate'],
+                    ["osascript", "-e", f'tell application id "{FL_BUNDLE_ID}" to activate'],
                     capture_output=True,
                     timeout=5,
                 )

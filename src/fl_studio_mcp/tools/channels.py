@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastmcp.exceptions import ToolError
+
+from fl_studio_mcp.utils.errors import run
+
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
@@ -20,11 +24,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
             global_count: If True, returns total channels ignoring groups.
                          If False, returns channels in current group only.
         """
-        conn = get_connection()
-        result = conn.send_command("channels.getCount", {"global_count": global_count})
-
-        if not result.get("success", False) and "error" in result:
-            return -1
+        result = run(get_connection(), "channels.getCount", {"global_count": global_count})
 
         return result.get("count", 0)
 
@@ -36,14 +36,10 @@ def register_channel_tools(mcp: FastMCP) -> None:
             index: Channel index
             use_global_index: Whether to use global channel indexing
         """
-        conn = get_connection()
-        result = conn.send_command("channels.getInfo", {
+        result = run(get_connection(), "channels.getInfo", {
             "index": index,
             "use_global": use_global_index,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return {"error": result["error"]}
 
         return {
             "index": result.get("index", index),
@@ -64,11 +60,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
         Returns a list of all channels with their basic properties.
         """
-        conn = get_connection()
-        result = conn.send_command("channels.getAll")
-
-        if not result.get("success", False) and "error" in result:
-            return [{"error": result["error"]}]
+        result = run(get_connection(), "channels.getAll")
 
         return result.get("channels", [])
 
@@ -78,11 +70,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
         Returns None if no channel is selected.
         """
-        conn = get_connection()
-        result = conn.send_command("channels.getSelected")
-
-        if not result.get("success", False) and "error" in result:
-            return {"error": result["error"]}
+        result = run(get_connection(), "channels.getSelected")
 
         return result.get("channel")
 
@@ -94,14 +82,10 @@ def register_channel_tools(mcp: FastMCP) -> None:
             index: Channel index (global)
             select: True to select, False to deselect
         """
-        conn = get_connection()
-        result = conn.send_command("channels.select", {
+        result = run(get_connection(), "channels.select", {
             "index": index,
             "select": select,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         channel_name = result.get("channel_name", f"Channel {index}")
         return f"Channel '{channel_name}' {'selected' if select else 'deselected'}"
@@ -113,11 +97,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         Args:
             index: Channel index (global) to select exclusively
         """
-        conn = get_connection()
-        result = conn.send_command("channels.selectOne", {"index": index})
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
+        result = run(get_connection(), "channels.selectOne", {"index": index})
 
         channel_name = result.get("channel_name", f"Channel {index}")
         return f"Channel '{channel_name}' selected exclusively"
@@ -141,20 +121,16 @@ def register_channel_tools(mcp: FastMCP) -> None:
             midi_channel: MIDI channel (-1 for default)
         """
         if not 0 <= note <= 127:
-            return "Error: Note must be between 0 and 127"
+            raise ToolError("Note must be between 0 and 127")
         if not 0 <= velocity <= 127:
-            return "Error: Velocity must be between 0 and 127"
+            raise ToolError("Velocity must be between 0 and 127")
 
-        conn = get_connection()
-        result = conn.send_command("channels.triggerNote", {
+        run(get_connection(), "channels.triggerNote", {
             "channel": channel,
             "note": note,
             "velocity": velocity,
             "midi_channel": midi_channel,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
         note_name = note_names[note % 12]
@@ -176,16 +152,12 @@ def register_channel_tools(mcp: FastMCP) -> None:
             volume: Volume level from 0.0 (silence) to 1.0 (full)
         """
         if not 0.0 <= volume <= 1.0:
-            return "Error: Volume must be between 0.0 and 1.0"
+            raise ToolError("Volume must be between 0.0 and 1.0")
 
-        conn = get_connection()
-        result = conn.send_command("channels.setVolume", {
+        result = run(get_connection(), "channels.setVolume", {
             "index": index,
             "volume": volume,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         channel_name = result.get("channel_name", f"Channel {index}")
         new_volume = result.get("volume", volume)
@@ -200,16 +172,12 @@ def register_channel_tools(mcp: FastMCP) -> None:
             pan: Pan from -1.0 (full left) to 1.0 (full right), 0.0 = center
         """
         if not -1.0 <= pan <= 1.0:
-            return "Error: Pan must be between -1.0 and 1.0"
+            raise ToolError("Pan must be between -1.0 and 1.0")
 
-        conn = get_connection()
-        result = conn.send_command("channels.setPan", {
+        result = run(get_connection(), "channels.setPan", {
             "index": index,
             "pan": pan,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         channel_name = result.get("channel_name", f"Channel {index}")
         new_pan = result.get("pan", pan)
@@ -223,14 +191,10 @@ def register_channel_tools(mcp: FastMCP) -> None:
             index: Channel index (global)
             muted: True to mute, False to unmute, None to toggle
         """
-        conn = get_connection()
-        result = conn.send_command("channels.mute", {
+        result = run(get_connection(), "channels.mute", {
             "index": index,
             "muted": muted,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         is_muted = result.get("is_muted", False)
         channel_name = result.get("channel_name", f"Channel {index}")
@@ -244,14 +208,10 @@ def register_channel_tools(mcp: FastMCP) -> None:
             index: Channel index (global)
             solo: True to solo, False to unsolo, None to toggle
         """
-        conn = get_connection()
-        result = conn.send_command("channels.solo", {
+        result = run(get_connection(), "channels.solo", {
             "index": index,
             "solo": solo,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         is_solo = result.get("is_solo", False)
         channel_name = result.get("channel_name", f"Channel {index}")
@@ -265,14 +225,10 @@ def register_channel_tools(mcp: FastMCP) -> None:
             index: Channel index (global)
             name: New name for the channel
         """
-        conn = get_connection()
-        result = conn.send_command("channels.setName", {
+        run(get_connection(), "channels.setName", {
             "index": index,
             "name": name,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         return f"Channel {index} renamed to '{name}'"
 
@@ -286,16 +242,12 @@ def register_channel_tools(mcp: FastMCP) -> None:
             green: Green component (0-255)
             blue: Blue component (0-255)
         """
-        conn = get_connection()
-        result = conn.send_command("channels.setColor", {
+        run(get_connection(), "channels.setColor", {
             "index": index,
             "r": red,
             "g": green,
             "b": blue,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         return f"Channel {index} color set to RGB({red}, {green}, {blue})"
 
@@ -307,14 +259,10 @@ def register_channel_tools(mcp: FastMCP) -> None:
             channel_index: Channel index (global)
             mixer_track: Mixer track index to route to
         """
-        conn = get_connection()
-        result = conn.send_command("channels.routeToMixer", {
+        result = run(get_connection(), "channels.routeToMixer", {
             "channel_index": channel_index,
             "mixer_track": mixer_track,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         channel_name = result.get("channel_name", f"Channel {channel_index}")
         return f"Channel '{channel_name}' routed to mixer track {mixer_track}"
@@ -329,14 +277,10 @@ def register_channel_tools(mcp: FastMCP) -> None:
             channel: Channel index (global)
             position: Step position (0-based)
         """
-        conn = get_connection()
-        result = conn.send_command("channels.getGridBit", {
+        result = run(get_connection(), "channels.getGridBit", {
             "channel": channel,
             "position": position,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return False
 
         return result.get("value", False)
 
@@ -351,15 +295,11 @@ def register_channel_tools(mcp: FastMCP) -> None:
             position: Step position (0-based)
             value: True to enable the step, False to disable
         """
-        conn = get_connection()
-        result = conn.send_command("channels.setGridBit", {
+        result = run(get_connection(), "channels.setGridBit", {
             "channel": channel,
             "position": position,
             "value": value,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         channel_name = result.get("channel_name", f"Channel {channel}")
         return f"Channel '{channel_name}' step {position} {'enabled' if value else 'disabled'}"
@@ -372,14 +312,10 @@ def register_channel_tools(mcp: FastMCP) -> None:
             channel: Channel index (global)
             steps: Number of steps to retrieve (default 16)
         """
-        conn = get_connection()
-        result = conn.send_command("channels.getStepSequence", {
+        result = run(get_connection(), "channels.getStepSequence", {
             "channel": channel,
             "steps": steps,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return []
 
         return result.get("sequence", [])
 
@@ -391,14 +327,10 @@ def register_channel_tools(mcp: FastMCP) -> None:
             channel: Channel index (global)
             pattern: List of boolean values for each step (True = on, False = off)
         """
-        conn = get_connection()
-        result = conn.send_command("channels.setStepSequence", {
+        result = run(get_connection(), "channels.setStepSequence", {
             "channel": channel,
             "pattern": pattern,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         channel_name = result.get("channel_name", f"Channel {channel}")
         active_steps = result.get("active_steps", sum(pattern))

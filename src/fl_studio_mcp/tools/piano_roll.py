@@ -14,11 +14,14 @@ Communication flow:
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fl_studio_mcp.utils.fl_trigger import get_trigger
+from fastmcp.exceptions import ToolError
+
+from fl_studio_mcp.utils.fl_trigger import FLProbeError, get_trigger
 from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
 
 if TYPE_CHECKING:
@@ -111,6 +114,18 @@ PR_SCRIPT_QUEUED_HINT = (
     " The request is still queued and will be processed on the next successful "
     "trigger; cancel it with fl_clear_request_queue."
 )
+PR_FL_NOT_RUNNING = (
+    "FL Studio is not running. Start it, open a piano roll and run ComposeWithLLM once "
+    "from the piano roll's Tools > Scripting menu, then retry."
+)
+PR_FL_PROBE_FAILED = (
+    "Could not determine whether FL Studio is running ({detail}). On macOS, grant "
+    "Automation access to System Events for this app in System Settings > Privacy & "
+    "Security > Automation, then retry."
+)
+
+# Serialises the whole note round-trip (queue write, focus, keystroke, wait).
+_PR_LOCK = threading.Lock()
 
 
 def _not_run_error() -> str:
@@ -219,6 +234,19 @@ def _run_pr_script(timeout: float = PR_SCRIPT_TIMEOUT) -> dict:
                 f"Press {trigger.keystroke} in the piano roll manually."
             ),
         }
+
+    try:
+        fl_running = trigger.is_fl_running()
+    except FLProbeError as e:
+        error = PR_FL_PROBE_FAILED.format(detail=e)
+        if _load_request_queue():
+            error += PR_SCRIPT_QUEUED_HINT
+        return {"triggered": False, "ran": False, "response": None, "error": error}
+    if not fl_running:
+        error = PR_FL_NOT_RUNNING
+        if _load_request_queue():
+            error += PR_SCRIPT_QUEUED_HINT
+        return {"triggered": False, "ran": False, "response": None, "error": error}
 
     # Remove a stale response BEFORE triggering: the script answers within
     # milliseconds, so deleting it after the keystroke would discard the
@@ -346,10 +374,18 @@ def _midi_to_note_name(midi: int) -> str:
 
 
 def _get_trigger_info(auto_trigger: bool) -> str:
-    """Run the piano roll script (if requested) and return a status suffix."""
+    """Run the piano roll script (if requested); raise when FL Studio did not process it."""
     if not auto_trigger:
         return ""
-    return " " + _describe_run(_run_pr_script())
+    outcome = _run_pr_script()
+    if not outcome["ran"]:
+        raise ToolError(outcome["error"])
+    response = outcome.get("response") or {}
+    if response.get("status") == "error":
+        raise ToolError(
+            f"FL Studio ran the script but it reported an error: {response.get('message')}"
+        )
+    return " " + _describe_run(outcome)
 
 
 def register_piano_roll_tools(mcp: FastMCP) -> None:
@@ -380,14 +416,14 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             ]
         """
         if not notes:
-            return "Error: No notes provided"
+            raise ToolError("No notes provided")
 
         # Validate notes
         for i, note in enumerate(notes):
             if "midi" not in note:
-                return f"Error: Note {i} missing 'midi' field"
+                raise ToolError(f"Note {i} missing 'midi' field")
             if "duration" not in note:
-                return f"Error: Note {i} missing 'duration' field"
+                raise ToolError(f"Note {i} missing 'duration' field")
 
             # Set defaults
             note.setdefault("time", 0)
@@ -402,9 +438,9 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         # Add notes request
         requests.append({"action": "add_notes", "notes": notes})
 
-        _write_request(requests)
-
-        trigger_info = _get_trigger_info(auto_trigger)
+        with _PR_LOCK:
+            _write_request(requests)
+            trigger_info = _get_trigger_info(auto_trigger)
         note_count = len(notes)
         note_summary = ", ".join(
             f"{_midi_to_note_name(n['midi'])}@{n.get('time', 0)}" for n in notes[:5]
@@ -441,16 +477,16 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             fl_send_chord([57, 60, 64, 67], time=2, duration=2.0)
         """
         if not midi_notes:
-            return "Error: No MIDI notes provided"
+            raise ToolError("No MIDI notes provided")
 
         # Build chord notes with velocity included
         chord_notes = [{"midi": midi, "velocity": velocity} for midi in midi_notes]
 
         request = {"action": "add_chord", "time": time, "duration": duration, "notes": chord_notes}
 
-        _write_request(request)
-
-        trigger_info = _get_trigger_info(auto_trigger)
+        with _PR_LOCK:
+            _write_request(request)
+            trigger_info = _get_trigger_info(auto_trigger)
         note_names = ", ".join(_midi_to_note_name(n) for n in midi_notes)
         return f"Queued chord [{note_names}] at beat {time}, duration {duration}.{trigger_info}"
 
@@ -468,12 +504,12 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             [{"midi": 60, "time": 0}, {"midi": 64, "time": 0}]
         """
         if not notes:
-            return "Error: No notes specified for deletion"
+            raise ToolError("No notes specified for deletion")
 
         request = {"action": "delete_notes", "notes": notes}
-        _write_request(request)
-
-        trigger_info = _get_trigger_info(auto_trigger)
+        with _PR_LOCK:
+            _write_request(request)
+            trigger_info = _get_trigger_info(auto_trigger)
         return f"Queued deletion of {len(notes)} note(s).{trigger_info}"
 
     @mcp.tool()
@@ -484,9 +520,9 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             auto_trigger: Whether to automatically trigger FL Studio
         """
         request = {"action": "clear"}
-        _write_request(request)
-
-        trigger_info = _get_trigger_info(auto_trigger)
+        with _PR_LOCK:
+            _write_request(request)
+            trigger_info = _get_trigger_info(auto_trigger)
         return f"Queued clear all notes.{trigger_info}"
 
     @mcp.tool()
@@ -503,10 +539,10 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         state = _read_state()
 
         if state is None:
-            return {
-                "error": "No piano roll state available. Make sure FL Studio's "
+            raise ToolError(
+                "No piano roll state available. Make sure FL Studio's "
                 "ComposeWithLLM script has been run at least once."
-            }
+            )
 
         # Add human-readable note names
         if "notes" in state:
@@ -532,10 +568,11 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         This sends the keystroke (Cmd+Opt+Y on macOS, Ctrl+Alt+Y on Windows)
         to FL Studio to execute the ComposeWithLLM piano roll script.
         """
-        run = _run_pr_script()
-        if not run["ran"]:
-            return f"Error: {run['error']}"
-        return _describe_run(run)
+        with _PR_LOCK:
+            outcome = _run_pr_script()
+        if not outcome["ran"]:
+            raise ToolError(outcome["error"])
+        return _describe_run(outcome)
 
     @mcp.tool()
     def fl_get_pr_context() -> dict:
@@ -550,29 +587,28 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         Requires an open piano roll and, once per FL Studio session, a manual
         run of ComposeWithLLM from the piano roll's Tools > Scripting menu.
         """
-        _write_request({"action": "get_context"})
-        run = _run_pr_script()
-        if not run["ran"]:
-            # Do not let context requests pile up for the next successful trigger.
-            _remove_queued_actions("get_context")
-            if run["triggered"]:
+        with _PR_LOCK:
+            _write_request({"action": "get_context"})
+            outcome = _run_pr_script()
+            if not outcome["ran"]:
+                # Do not let context requests pile up for the next successful trigger.
+                _remove_queued_actions("get_context")
+        if not outcome["ran"]:
+            if outcome["triggered"]:
                 # The generic hint mentions the queue; this request is gone.
-                return {"error": PR_SCRIPT_NOT_RUN_HINT}
-            return {"error": run["error"]}
+                raise ToolError(PR_SCRIPT_NOT_RUN_HINT)
+            raise ToolError(outcome["error"])
 
-        response = run.get("response") or {}
+        response = outcome.get("response") or {}
         if response.get("status") == "error":
-            return {"error": f"Piano roll script error: {response.get('message')}"}
+            raise ToolError(f"Piano roll script error: {response.get('message')}")
         context = response.get("context")
         if not isinstance(context, dict):
-            return {
-                "error": (
-                    "The piano roll script answered without context data. Update "
-                    "ComposeWithLLM.pyscript in FL Studio's 'Piano roll scripts' "
-                    "folder from this repository."
-                ),
-                "raw_response": response,
-            }
+            raise ToolError(
+                "The piano roll script answered without context data. Update "
+                "ComposeWithLLM.pyscript in FL Studio's 'Piano roll scripts' "
+                f"folder from this repository. Raw response: {response!r}"
+            )
         return _enrich_pr_context(context)
 
     @mcp.tool()

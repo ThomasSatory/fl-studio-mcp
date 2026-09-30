@@ -1,18 +1,19 @@
 #!/bin/bash
-# Configure Claude Desktop/Code to use the FL Studio MCP server
+# Configure Claude Desktop and/or Claude Code to use the FL Studio MCP server.
 #
-# This script adds the FL Studio MCP server configuration to Claude's
-# config file, enabling AI control of FL Studio via MIDI.
+# Environment (all optional, set by install.sh):
+#   FL_MCP_CLIENT  desktop | code | both | none   (otherwise an interactive menu)
+#   FL_MCP_YES     1 to skip every prompt
+#   UV_BIN         absolute path to uv (otherwise resolved from PATH)
 
 set -e
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -22,192 +23,118 @@ echo -e "${BLUE}FL Studio MCP - Claude Configuration${NC}"
 echo "======================================"
 echo ""
 echo -e "Project directory: ${CYAN}$PROJECT_DIR${NC}"
-echo ""
 
-# Check for uv
-if ! command -v uv &> /dev/null; then
-    echo -e "${YELLOW}Warning: uv is not installed.${NC}"
-    echo "The MCP server requires uv to run. Install it with:"
+# GUI apps (Claude Desktop) do not inherit the shell PATH, so the config must
+# carry uv's absolute path.
+UV_BIN="${UV_BIN:-$(command -v uv || true)}"
+if [[ -z "$UV_BIN" ]]; then
+    echo -e "${YELLOW}Warning: uv is not installed.${NC} The MCP server needs it:"
     echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
-    echo ""
+    UV_BIN="uv"
 fi
+echo -e "uv: ${CYAN}$UV_BIN${NC}"
+echo ""
 
-# Determine Claude config locations based on OS
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS
     CLAUDE_DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
-    CLAUDE_CODE_CONFIG="$HOME/.claude.json"
-    OS_NAME="macOS"
 elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" || "$OSTYPE" == "cygwin" ]]; then
-    # Windows
     CLAUDE_DESKTOP_CONFIG="$APPDATA/Claude/claude_desktop_config.json"
-    CLAUDE_CODE_CONFIG="$USERPROFILE/.claude.json"
-    OS_NAME="Windows"
 else
-    # Linux
     CLAUDE_DESKTOP_CONFIG="$HOME/.config/Claude/claude_desktop_config.json"
-    CLAUDE_CODE_CONFIG="$HOME/.claude.json"
-    OS_NAME="Linux"
 fi
 
-# Function to check if a config exists and show its status
-check_config_status() {
-    local config_file="$1"
-    local config_name="$2"
-
-    if [[ -f "$config_file" ]]; then
-        if grep -q "fl-studio" "$config_file" 2>/dev/null; then
-            echo -e "  ${GREEN}✓${NC} $config_name: Already configured"
-            return 0
-        else
-            echo -e "  ${YELLOW}○${NC} $config_name: Not configured"
-            return 1
-        fi
-    else
-        echo -e "  ${YELLOW}○${NC} $config_name: Config file not found"
-        return 1
-    fi
+print_manual_config() {
+    echo ""
+    echo -e "${CYAN}Manual configuration${NC}"
+    echo "Claude Desktop config file: $CLAUDE_DESKTOP_CONFIG"
+    echo "Claude Code: claude mcp add --scope user fl-studio -- \"$UV_BIN\" run --directory \"$PROJECT_DIR\" fl-studio-mcp"
+    echo ""
+    echo "JSON to add under \"mcpServers\":"
+    echo '{'
+    echo '  "mcpServers": {'
+    echo '    "fl-studio": {'
+    echo "      \"command\": \"$UV_BIN\","
+    echo "      \"args\": [\"run\", \"--directory\", \"$PROJECT_DIR\", \"fl-studio-mcp\"]"
+    echo '    }'
+    echo '  }'
+    echo '}'
+    echo ""
 }
 
-# Function to add MCP server to a config file
-add_mcp_to_config() {
-    local config_file="$1"
-    local config_name="$2"
-
-    echo -e "Configuring ${CYAN}$config_name${NC}..."
-
-    # Create config directory if needed
-    mkdir -p "$(dirname "$config_file")"
-
-    # If config doesn't exist, create it
-    if [[ ! -f "$config_file" ]]; then
-        echo '{}' > "$config_file"
-        echo "  Created new config file"
+configure_desktop() {
+    echo -e "Configuring ${CYAN}Claude Desktop${NC}..."
+    mkdir -p "$(dirname "$CLAUDE_DESKTOP_CONFIG")"
+    if [[ ! -f "$CLAUDE_DESKTOP_CONFIG" ]]; then
+        echo '{}' > "$CLAUDE_DESKTOP_CONFIG"
     fi
-
-    # Check if file has valid JSON
-    if ! python3 -c "import json; json.load(open('$config_file'))" 2>/dev/null; then
-        echo -e "  ${YELLOW}Warning: Invalid JSON in config. Creating backup and new config.${NC}"
-        cp "$config_file" "${config_file}.backup"
-        echo '{}' > "$config_file"
+    if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$CLAUDE_DESKTOP_CONFIG" 2>/dev/null; then
+        echo -e "  ${YELLOW}Invalid JSON in config: backing it up and starting fresh.${NC}"
+        cp "$CLAUDE_DESKTOP_CONFIG" "${CLAUDE_DESKTOP_CONFIG}.backup"
+        echo '{}' > "$CLAUDE_DESKTOP_CONFIG"
     fi
-
-    # Add FL Studio MCP server using Python for reliable JSON manipulation
-    python3 << EOF
-import json
-
-config_file = "$config_file"
-project_dir = "$PROJECT_DIR"
-
-# Read existing config
-with open(config_file, 'r') as f:
+    python3 - "$CLAUDE_DESKTOP_CONFIG" "$UV_BIN" "$PROJECT_DIR" <<'PYEOF'
+import json, sys
+path, uv_bin, project_dir = sys.argv[1:4]
+with open(path) as f:
     config = json.load(f)
-
-# Ensure mcpServers exists
-if 'mcpServers' not in config:
-    config['mcpServers'] = {}
-
-# Add fl-studio entry
-config['mcpServers']['fl-studio'] = {
-    "command": "uv",
-    "args": ["run", "--directory", project_dir, "fl-studio-mcp"]
+config.setdefault("mcpServers", {})["fl-studio"] = {
+    "command": uv_bin,
+    "args": ["run", "--directory", project_dir, "fl-studio-mcp"],
 }
-
-# Write back with pretty formatting
-with open(config_file, 'w') as f:
+with open(path, "w") as f:
     json.dump(config, f, indent=2)
-EOF
-
-    echo -e "  ${GREEN}✓${NC} Added fl-studio MCP server"
+PYEOF
+    echo -e "  ${GREEN}✓${NC} fl-studio added to $CLAUDE_DESKTOP_CONFIG"
 }
 
-# Show current status
-echo "Current configuration status:"
-if check_config_status "$CLAUDE_DESKTOP_CONFIG" "Claude Desktop"; then
-    DESKTOP_CONFIGURED=0
-else
-    DESKTOP_CONFIGURED=1
-fi
-if check_config_status "$CLAUDE_CODE_CONFIG" "Claude Code"; then
-    CODE_CONFIGURED=0
-else
-    CODE_CONFIGURED=1
-fi
-echo ""
+configure_code() {
+    echo -e "Configuring ${CYAN}Claude Code${NC}..."
+    if ! command -v claude >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}The 'claude' command is not installed; add the server manually:${NC}"
+        print_manual_config
+        return 0
+    fi
+    if claude mcp get fl-studio >/dev/null 2>&1; then
+        echo "  fl-studio is already registered in Claude Code; re-registering with the current paths."
+        claude mcp remove --scope user fl-studio >/dev/null 2>&1 || true
+    fi
+    if claude mcp add --scope user fl-studio -- "$UV_BIN" run --directory "$PROJECT_DIR" fl-studio-mcp; then
+        echo -e "  ${GREEN}✓${NC} fl-studio registered in Claude Code (user scope)"
+    else
+        echo -e "  ${YELLOW}'claude mcp add' refused (an organisation policy can forbid local MCP servers).${NC}"
+        print_manual_config
+    fi
+}
 
-# Menu
-echo "Select which Claude client(s) to configure:"
-echo ""
-echo "  1) Claude Desktop only"
-echo "  2) Claude Code only"
-echo "  3) Both Claude Desktop and Code"
-echo "  4) Show manual configuration"
-echo "  5) Skip / Exit"
-echo ""
-read -p "Enter choice [1-5]: " choice
+CHOICE="${FL_MCP_CLIENT:-}"
+if [[ -z "$CHOICE" ]]; then
+    if [[ "${FL_MCP_YES:-}" == "1" ]]; then
+        CHOICE="both"
+    else
+        echo "Select which Claude client(s) to configure:"
+        echo "  1) Claude Desktop only"
+        echo "  2) Claude Code only"
+        echo "  3) Both"
+        echo "  4) Show manual configuration"
+        echo "  5) Skip"
+        read -p "Enter choice [1-5]: " menu
+        case "$menu" in
+            1) CHOICE="desktop" ;;
+            2) CHOICE="code" ;;
+            3) CHOICE="both" ;;
+            4) print_manual_config; exit 0 ;;
+            *) CHOICE="none" ;;
+        esac
+    fi
+fi
 
-case $choice in
-    1)
-        echo ""
-        add_mcp_to_config "$CLAUDE_DESKTOP_CONFIG" "Claude Desktop"
-        ;;
-    2)
-        echo ""
-        add_mcp_to_config "$CLAUDE_CODE_CONFIG" "Claude Code"
-        ;;
-    3)
-        echo ""
-        add_mcp_to_config "$CLAUDE_DESKTOP_CONFIG" "Claude Desktop"
-        echo ""
-        add_mcp_to_config "$CLAUDE_CODE_CONFIG" "Claude Code"
-        ;;
-    4)
-        echo ""
-        echo -e "${CYAN}Manual Configuration${NC}"
-        echo ""
-        echo "Add the following to your Claude config file:"
-        echo ""
-        echo -e "${YELLOW}Config file locations:${NC}"
-        echo "  Claude Desktop: $CLAUDE_DESKTOP_CONFIG"
-        echo "  Claude Code:    $CLAUDE_CODE_CONFIG"
-        echo ""
-        echo -e "${YELLOW}Add this JSON to your config:${NC}"
-        echo ""
-        echo '{'
-        echo '  "mcpServers": {'
-        echo '    "fl-studio": {'
-        echo '      "command": "uv",'
-        echo "      \"args\": [\"run\", \"--directory\", \"$PROJECT_DIR\", \"fl-studio-mcp\"]"
-        echo '    }'
-        echo '  }'
-        echo '}'
-        echo ""
-        exit 0
-        ;;
-    5)
-        echo ""
-        echo "Skipping configuration."
-        exit 0
-        ;;
-    *)
-        echo ""
-        echo -e "${RED}Invalid choice. Exiting.${NC}"
-        exit 1
-        ;;
+case "$CHOICE" in
+    desktop) configure_desktop ;;
+    code) configure_code ;;
+    both) configure_desktop; echo ""; configure_code ;;
+    none) echo "Skipping Claude configuration." ;;
+    *) echo -e "${RED}Unknown FL_MCP_CLIENT '$CHOICE' (desktop|code|both|none)${NC}"; exit 1 ;;
 esac
 
 echo ""
-echo -e "${GREEN}Configuration complete!${NC}"
-echo ""
-echo "Next steps:"
-echo ""
-echo -e "  1. ${YELLOW}Restart Claude Desktop/Code${NC} to load the new configuration"
-echo ""
-echo -e "  2. ${YELLOW}Open FL Studio${NC} and configure the MIDI controller:"
-echo "     - Go to Options > MIDI Settings"
-echo "     - Select your virtual MIDI port (IAC Driver on Mac)"
-echo "     - Set Controller type to: FLStudioMCP"
-echo "     - Enable the port (click to highlight)"
-echo ""
-echo -e "  3. ${YELLOW}Test the connection${NC} by asking Claude to get FL Studio status"
-echo ""
+echo -e "${GREEN}Configuration complete.${NC} Restart Claude Desktop/Code to load the server."

@@ -28,6 +28,9 @@ class FakeTrigger:
         self.send_ok = send_ok
         self.calls = 0
 
+    def is_fl_running(self):
+        return True
+
     def activate_window(self):
         self.activations = getattr(self, "activations", 0) + 1
         return True

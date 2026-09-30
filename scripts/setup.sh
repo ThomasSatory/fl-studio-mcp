@@ -2,10 +2,12 @@
 # FL Studio MCP Setup Script
 #
 # This script:
-# 1. Checks/guides virtual MIDI port setup (IAC Driver on Mac, loopMIDI on Windows)
-# 2. Installs the FL Studio MIDI controller script
-# 3. Installs the Piano Roll script (ComposeWithLLM)
-# 4. Installs Python dependencies
+# 1. Installs Python dependencies (uv, or pip as a fallback)
+# 2. Checks/guides virtual MIDI port setup (IAC Driver on Mac, loopMIDI on Windows)
+# 3. Installs the FL Studio MIDI controller script
+# 4. Installs the Piano Roll script (ComposeWithLLM)
+#
+# FL_MCP_YES=1 skips every prompt.
 
 set -e
 
@@ -39,32 +41,55 @@ else
     OS="linux"
 fi
 
-# Step 1: Virtual MIDI Setup
-echo "Step 1: Checking Virtual MIDI Setup..."
+# Step 1: Python dependencies (needed below to list the MIDI ports)
+echo "Step 1: Installing Python dependencies..."
+echo "----------------------------------------------"
+
+cd "$PROJECT_DIR"
+
+if command -v uv &> /dev/null; then
+    echo "Using uv to install dependencies..."
+    uv sync
+    echo -e "${GREEN}✓ Dependencies installed with uv${NC}"
+elif command -v pip &> /dev/null; then
+    echo "Using pip to install dependencies..."
+    pip install -e .
+    echo -e "${GREEN}✓ Dependencies installed with pip${NC}"
+else
+    echo -e "${YELLOW}⚠ Neither uv nor pip found. Please install dependencies manually:${NC}"
+    echo "  pip install -e ."
+fi
+
+# Step 2: Virtual MIDI Setup
+echo ""
+echo "Step 2: Checking Virtual MIDI Setup..."
 echo "----------------------------------------------"
 
 if [[ "$OS" == "mac" ]]; then
-    # Check if IAC Driver is available
-    if system_profiler SPAudioDataType 2>/dev/null | grep -q "IAC Driver"; then
-        echo -e "${GREEN}✓ IAC Driver is available${NC}"
-    else
-        echo -e "${YELLOW}⚠ IAC Driver may not be enabled${NC}"
+    # Ask CoreMIDI (through mido) for the real list of output ports: the audio
+    # device list does not show MIDI ports, and the IAC bus name is localised.
+    IAC_PORTS=""
+    if command -v uv &> /dev/null; then
+        IAC_PORTS="$(uv run python -c 'import mido; print("\n".join(p for p in mido.get_output_names() if "IAC" in p))' 2>/dev/null || true)"
     fi
-
-    echo ""
-    echo "To enable IAC Driver (if not already enabled):"
-    echo "  1. Open 'Audio MIDI Setup' (search in Spotlight)"
-    echo "  2. Press Cmd+2 or go to Window > Show MIDI Studio"
-    echo "  3. Double-click on 'IAC Driver'"
-    echo "  4. Check 'Device is online'"
-    echo "  5. Click 'Apply'"
-    echo ""
-
-    read -p "Press Enter to open Audio MIDI Setup, or 's' to skip: " choice
-    if [[ "$choice" != "s" && "$choice" != "S" ]]; then
-        open -a "Audio MIDI Setup"
+    if [[ -n "$IAC_PORTS" ]]; then
+        echo -e "${GREEN}✓ IAC bus online:${NC} $IAC_PORTS"
+    else
+        echo -e "${YELLOW}⚠ No IAC bus is online (the bus name is localised, e.g. 'Gestionnaire IAC Bus 1' in French).${NC}"
         echo ""
-        read -p "Press Enter when IAC Driver is configured..."
+        echo "To enable it:"
+        echo "  1. Open 'Audio MIDI Setup' (search in Spotlight)"
+        echo "  2. Window > Show MIDI Studio"
+        echo "  3. Double-click 'IAC Driver' and tick 'Device is online'"
+        echo ""
+        if [[ "${FL_MCP_YES:-}" != "1" ]]; then
+            read -p "Press Enter to open Audio MIDI Setup, or 's' to skip: " choice
+            if [[ "$choice" != "s" && "$choice" != "S" ]]; then
+                open -a "Audio MIDI Setup"
+                echo ""
+                read -p "Press Enter when the IAC Driver is online..."
+            fi
+        fi
     fi
 elif [[ "$OS" == "windows" ]]; then
     echo "Windows detected. Please ensure loopMIDI is installed and running."
@@ -72,27 +97,26 @@ elif [[ "$OS" == "windows" ]]; then
     echo ""
     echo "Create a virtual MIDI port in loopMIDI (any name works)."
     echo ""
-    read -p "Press Enter when loopMIDI is configured..."
+    if [[ "${FL_MCP_YES:-}" != "1" ]]; then
+        read -p "Press Enter when loopMIDI is configured..."
+    fi
 fi
 
-# Step 2: Install FL Studio MIDI Controller
+# Step 3: Install FL Studio MIDI Controller
 echo ""
-echo "Step 2: Installing FL Studio MIDI Controller..."
+echo "Step 3: Installing FL Studio MIDI Controller..."
 echo "----------------------------------------------"
 
-# Create FL Studio Hardware directory if it doesn't exist
 if [[ ! -d "$FL_HARDWARE" ]]; then
     echo "Creating FL Studio Hardware directory..."
     mkdir -p "$FL_HARDWARE"
 fi
 
-# Create MCP controller directory
 if [[ ! -d "$MCP_CONTROLLER_DIR" ]]; then
     echo "Creating FLStudioMCP directory..."
     mkdir -p "$MCP_CONTROLLER_DIR"
 fi
 
-# Copy the controller script
 CONTROLLER_SOURCE="$PROJECT_DIR/fl_controller/device_FLStudioMCP.py"
 CONTROLLER_DEST="$MCP_CONTROLLER_DIR/device_FLStudioMCP.py"
 
@@ -105,18 +129,16 @@ else
     exit 1
 fi
 
-# Step 3: Install Piano Roll Script
+# Step 4: Install Piano Roll Script
 echo ""
-echo "Step 3: Installing Piano Roll Script..."
+echo "Step 4: Installing Piano Roll Script..."
 echo "----------------------------------------------"
 
-# Create Piano roll scripts directory if it doesn't exist
 if [[ ! -d "$FL_PIANO_SCRIPTS" ]]; then
     echo "Creating Piano roll scripts directory..."
     mkdir -p "$FL_PIANO_SCRIPTS"
 fi
 
-# Copy the Piano Roll script
 PIANO_SOURCE="$SCRIPT_DIR/ComposeWithLLM.pyscript"
 PIANO_DEST="$FL_PIANO_SCRIPTS/ComposeWithLLM.pyscript"
 
@@ -127,27 +149,6 @@ if [[ -f "$PIANO_SOURCE" ]]; then
 else
     echo -e "${YELLOW}⚠ Piano Roll script not found at: $PIANO_SOURCE${NC}"
     echo "  Piano Roll tools will not be available."
-fi
-
-# Step 4: Install Python dependencies
-echo ""
-echo "Step 4: Installing Python dependencies..."
-echo "----------------------------------------------"
-
-cd "$PROJECT_DIR"
-
-# Check if uv is available, otherwise use pip
-if command -v uv &> /dev/null; then
-    echo "Using uv to install dependencies..."
-    uv sync
-    echo -e "${GREEN}✓ Dependencies installed with uv${NC}"
-elif command -v pip &> /dev/null; then
-    echo "Using pip to install dependencies..."
-    pip install -e .
-    echo -e "${GREEN}✓ Dependencies installed with pip${NC}"
-else
-    echo -e "${YELLOW}⚠ Neither uv nor pip found. Please install dependencies manually:${NC}"
-    echo "  pip install -e ."
 fi
 
 echo ""
@@ -162,7 +163,7 @@ echo ""
 echo "2. Enable the MIDI controller in FL Studio:"
 echo "   - Go to Options > MIDI Settings"
 if [[ "$OS" == "mac" ]]; then
-    echo "   - Under 'Input', find 'IAC Driver Bus 1'"
+    echo "   - Under 'Input', find your IAC bus (e.g. 'IAC Driver Bus 1' or 'Gestionnaire IAC Bus 1')"
 else
     echo "   - Under 'Input', find your loopMIDI port"
 fi

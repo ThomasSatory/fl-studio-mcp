@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fl-studio-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for controlling FL Studio - mixer, transport, channels, plugins, and piano roll"
 readme = "README.md"
 license = "MIT"
@@ -58,6 +58,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

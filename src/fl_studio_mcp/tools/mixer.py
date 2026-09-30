@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastmcp.exceptions import ToolError
+
+from fl_studio_mcp.utils.errors import run
+
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
@@ -18,11 +22,7 @@ def register_mixer_tools(mcp: FastMCP) -> None:
 
         FL Studio typically has 125 mixer tracks (0-124), where track 0 is the Master.
         """
-        conn = get_connection()
-        result = conn.send_command("mixer.getTrackCount")
-
-        if not result.get("success", False) and "error" in result:
-            return -1  # Return -1 to indicate error
+        result = run(get_connection(), "mixer.getTrackCount")
 
         return result.get("count", 0)
 
@@ -33,11 +33,7 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         Args:
             track: Mixer track index (0 = Master, 1-124 = insert tracks)
         """
-        conn = get_connection()
-        result = conn.send_command("mixer.getTrackInfo", {"track": track})
-
-        if not result.get("success", False) and "error" in result:
-            return {"error": result["error"]}
+        result = run(get_connection(), "mixer.getTrackInfo", {"track": track})
 
         return {
             "index": result.get("index", track),
@@ -60,11 +56,7 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             include_empty: If False, only returns tracks with non-default names.
                           If True, returns all 125 tracks.
         """
-        conn = get_connection()
-        result = conn.send_command("mixer.getAllTracks", {"include_empty": include_empty})
-
-        if not result.get("success", False) and "error" in result:
-            return [{"error": result["error"]}]
+        result = run(get_connection(), "mixer.getAllTracks", {"include_empty": include_empty})
 
         return result.get("tracks", [])
 
@@ -79,16 +71,12 @@ def register_mixer_tools(mcp: FastMCP) -> None:
                    Values above 1.0 may cause clipping.
         """
         if not 0.0 <= volume <= 1.25:
-            return "Error: Volume should be between 0.0 and 1.25"
+            raise ToolError("Volume should be between 0.0 and 1.25")
 
-        conn = get_connection()
-        result = conn.send_command("mixer.setTrackVolume", {
+        result = run(get_connection(), "mixer.setTrackVolume", {
             "track": track,
             "volume": volume,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         new_vol = result.get("volume", 0)
         new_vol_db = result.get("volume_db", 0)
@@ -104,16 +92,12 @@ def register_mixer_tools(mcp: FastMCP) -> None:
                  0.0 is center.
         """
         if not -1.0 <= pan <= 1.0:
-            return "Error: Pan must be between -1.0 (left) and 1.0 (right)"
+            raise ToolError("Pan must be between -1.0 (left) and 1.0 (right)")
 
-        conn = get_connection()
-        result = conn.send_command("mixer.setTrackPan", {
+        result = run(get_connection(), "mixer.setTrackPan", {
             "track": track,
             "pan": pan,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         new_pan = result.get("pan", 0)
         if new_pan < -0.01:
@@ -133,14 +117,10 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             track: Mixer track index
             muted: True to mute, False to unmute, None to toggle
         """
-        conn = get_connection()
-        result = conn.send_command("mixer.muteTrack", {
+        result = run(get_connection(), "mixer.muteTrack", {
             "track": track,
             "muted": muted,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         is_muted = result.get("is_muted", False)
         track_name = result.get("track_name", f"Track {track}")
@@ -159,15 +139,11 @@ def register_mixer_tools(mcp: FastMCP) -> None:
                   3 = Solo with both source and send tracks (default)
                   4 = Solo track only
         """
-        conn = get_connection()
-        result = conn.send_command("mixer.soloTrack", {
+        result = run(get_connection(), "mixer.soloTrack", {
             "track": track,
             "solo": solo,
             "mode": mode,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         is_solo = result.get("is_solo", False)
         track_name = result.get("track_name", f"Track {track}")
@@ -182,11 +158,7 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         Args:
             track: Mixer track index
         """
-        conn = get_connection()
-        result = conn.send_command("mixer.armTrack", {"track": track})
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
+        result = run(get_connection(), "mixer.armTrack", {"track": track})
 
         is_armed = result.get("is_armed", False)
         track_name = result.get("track_name", f"Track {track}")
@@ -200,14 +172,10 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             track: Mixer track index
             name: New name for the track. Empty string resets to default.
         """
-        conn = get_connection()
-        result = conn.send_command("mixer.setTrackName", {
+        run(get_connection(), "mixer.setTrackName", {
             "track": track,
             "name": name,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         return f"Track {track} renamed to '{name}'"
 
@@ -221,16 +189,12 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             green: Green component (0-255)
             blue: Blue component (0-255)
         """
-        conn = get_connection()
-        result = conn.send_command("mixer.setTrackColor", {
+        run(get_connection(), "mixer.setTrackColor", {
             "track": track,
             "r": red,
             "g": green,
             "b": blue,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         return f"Track {track} color set to RGB({red}, {green}, {blue})"
 
@@ -244,15 +208,11 @@ def register_mixer_tools(mcp: FastMCP) -> None:
                        0.0 is default.
         """
         if not -1.0 <= separation <= 1.0:
-            return "Error: Separation must be between -1.0 and 1.0"
+            raise ToolError("Separation must be between -1.0 and 1.0")
 
-        conn = get_connection()
-        result = conn.send_command("mixer.setStereoSep", {
+        run(get_connection(), "mixer.setStereoSep", {
             "track": track,
             "separation": separation,
         })
-
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
 
         return f"Track {track} stereo separation set to {separation}"

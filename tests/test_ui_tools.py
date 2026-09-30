@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.ui import register_ui_tools
 
@@ -67,13 +68,16 @@ def test_open_piano_roll_without_channel_keeps_target(env):
 def test_open_piano_roll_rejects_negative_channel(env):
     tools, conn = env
 
-    assert "error" in tools["fl_open_piano_roll"](-1)
+    with pytest.raises(ToolError):
+        tools["fl_open_piano_roll"](-1)
     assert conn.sent == []
 
 
 def test_window_tools_reject_unknown_window(env):
     tools, conn = env
 
-    assert "error" in tools["fl_show_window"]("mixr")
-    assert "error" in tools["fl_focus_window"]("timeline")
+    with pytest.raises(ToolError, match="mixr"):
+        tools["fl_show_window"]("mixr")
+    with pytest.raises(ToolError, match="timeline"):
+        tools["fl_focus_window"]("timeline")
     assert conn.sent == []

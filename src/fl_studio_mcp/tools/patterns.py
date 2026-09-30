@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastmcp.exceptions import ToolError
+
+from fl_studio_mcp.utils.errors import run
+
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
@@ -19,7 +23,7 @@ def _index_error(index: object) -> str | None:
     FL create or select unexpected patterns instead of failing.
     """
     if isinstance(index, bool) or not isinstance(index, int) or index < 1:
-        return f"Error: pattern index must be a positive integer (1-based), got {index!r}"
+        return f"pattern index must be a positive integer (1-based), got {index!r}"
     return None
 
 
@@ -38,14 +42,12 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         Returns each pattern's index (1-based), name, color, length in beats
         and selection state, plus the currently active pattern.
         """
-        conn = get_connection()
-        return conn.send_command("patterns.getAll", {"include_default": include_default})
+        return run(get_connection(), "patterns.getAll", {"include_default": include_default})
 
     @mcp.tool()
     def fl_get_current_pattern() -> dict:
         """Get the currently active pattern (index, name, length in beats)."""
-        conn = get_connection()
-        return conn.send_command("patterns.getCurrent")
+        return run(get_connection(), "patterns.getCurrent")
 
     @mcp.tool()
     def fl_select_pattern(index: int) -> str:
@@ -55,11 +57,8 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         within sane bounds (use fl_new_pattern for a fresh pattern).
         """
         if error := _index_error(index):
-            return error
-        conn = get_connection()
-        result = conn.send_command("patterns.select", {"index": index})
-        if result.get("error"):
-            return f"Error: {result['error']}"
+            raise ToolError(error)
+        result = run(get_connection(), "patterns.select", {"index": index})
         return f"Selected pattern {result.get('selected')} ({result.get('name')})"
 
     @mcp.tool()
@@ -73,10 +72,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         Note: FL reports the length of an empty pattern as the project's
         current default (often the previous pattern's length), not 0.
         """
-        conn = get_connection()
-        result = conn.send_command("patterns.newEmpty", {})
-        if result.get("error"):
-            return f"Error: {result['error']}"
+        result = run(get_connection(), "patterns.newEmpty", {})
         return f"Switched to empty pattern {result.get('selected')} ({result.get('name')})"
 
     @mcp.tool()
@@ -88,21 +84,15 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         needed.
         """
         if index is not None and (error := _index_error(index)):
-            return error
-        conn = get_connection()
+            raise ToolError(error)
         params = {"index": index} if index is not None else {}
-        result = conn.send_command("patterns.clone", params)
-        if result.get("error"):
-            return f"Error: {result['error']}"
+        result = run(get_connection(), "patterns.clone", params)
         return f"Cloned to pattern {result.get('cloned_to')} ({result.get('name')})"
 
     @mcp.tool()
     def fl_rename_pattern(index: int, name: str) -> str:
         """Rename the pattern at index (1-based). Empty name resets to default."""
         if error := _index_error(index):
-            return error
-        conn = get_connection()
-        result = conn.send_command("patterns.setName", {"index": index, "name": name})
-        if result.get("error"):
-            return f"Error: {result['error']}"
+            raise ToolError(error)
+        result = run(get_connection(), "patterns.setName", {"index": index, "name": name})
         return f"Pattern {result.get('index')} is now named '{result.get('name')}'"

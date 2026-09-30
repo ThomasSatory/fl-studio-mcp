@@ -19,7 +19,9 @@ Limitations:
 from __future__ import annotations
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp import __version__
 from fl_studio_mcp.tools import (
     register_channel_tools,
     register_history_tools,
@@ -27,6 +29,7 @@ from fl_studio_mcp.tools import (
     register_pattern_tools,
     register_piano_roll_tools,
     register_plugin_tools,
+    register_project_tools,
     register_transport_tools,
     register_ui_tools,
 )
@@ -35,6 +38,7 @@ from fl_studio_mcp.utils.connection import get_connection, reset_connection
 # Create the MCP server
 mcp = FastMCP(
     name="fl-studio-mcp",
+    version=__version__,
     instructions="""
 FL Studio MCP Server - Control FL Studio from AI assistants.
 
@@ -46,6 +50,8 @@ Available tool categories:
 - Mixer: Volume, pan, mute, solo, track management
 - Channels: Channel info, note triggering, step sequencer
 - Plugins: Parameter control, preset navigation (cannot load new plugins)
+- Project: fl_get_project_snapshot for a one-call overview (transport, tempo,
+  patterns, channels, mixer tracks)
 
 Important limitations:
 1. Cannot load new VST/AU plugins - only control existing ones
@@ -110,7 +116,7 @@ def fl_connect() -> str:
     try:
         conn.ensure_connected()
     except RuntimeError as e:
-        return f"Connection failed: {e}"
+        raise ToolError(f"Connection failed: {e}") from e
     return "Successfully connected to FL Studio via MIDI!"
 
 
@@ -146,6 +152,7 @@ register_piano_roll_tools(mcp)
 register_history_tools(mcp)
 register_pattern_tools(mcp)
 register_ui_tools(mcp)
+register_project_tools(mcp)
 
 
 def main():

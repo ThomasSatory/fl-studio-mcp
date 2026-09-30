@@ -85,27 +85,37 @@ def OnIdle():
     pass  # Required FL Studio API hook; no polling needed
 
 
+# Id of the last executed command. A MIDI trigger queued while FL Studio was
+# busy (the server has already timed out and written the next command) reads
+# the current command file; without this guard that command would run twice.
+_last_request_id = None
+
+
 def execute_pending_command():
-    """Read command from JSON file, execute it, and write response."""
-    response = {"success": False, "error": None}
+    """Read command from JSON file, execute it, and write response tagged with its id."""
+    global _last_request_id
+    response = {"id": None, "success": False, "error": None}
 
     try:
-        # Read command file
         if not COMMAND_FILE.exists():
             response["error"] = "No command file found"
             write_response(response)
             return
 
-        command_text = COMMAND_FILE.read_text()
-        command = json.loads(command_text)
+        command = json.loads(COMMAND_FILE.read_text())
+        request_id = command.get("id")
+        if request_id is not None and request_id == _last_request_id:
+            # Late trigger for a command that already ran: its response is on disk.
+            return
+        _last_request_id = request_id
+        response["id"] = request_id
 
         action = command.get("action", "")
         params = command.get("params", {})
 
-        # Execute command and get result
         result = dispatch_command(action, params)
         # A handler that returns {"error": ...} has failed; do not mark it a success.
-        response = {"success": not result.get("error"), **result}
+        response = {"id": command.get("id"), "success": not result.get("error"), **result}
 
     except json.JSONDecodeError as e:
         response["error"] = f"Invalid JSON in command file: {e}"
@@ -469,10 +479,60 @@ def handle_general_get_undo_status(params: dict) -> dict:
         return {"error": str(e)}
 
 
+# =============================================================================
+# Project snapshot (one round-trip overview)
+# =============================================================================
+
+
+def _snapshot_patterns() -> dict:
+    listing = handle_patterns_get_all({"include_default": False})
+    if listing.get("error"):
+        raise RuntimeError(listing["error"])
+    counts = handle_patterns_get_count({})
+    if counts.get("error"):
+        raise RuntimeError(counts["error"])
+    return {"current": listing["current"], "count": counts["count"], "items": listing["patterns"]}
+
+
+def handle_project_snapshot(params: dict) -> dict:
+    """Transport, tempo, patterns, channels and mixer tracks in one response.
+
+    Each section is computed on its own; one failing section becomes
+    {"error": ...} without hiding the others.
+    """
+
+    def section(compute):
+        try:
+            return compute()
+        except Exception as e:
+            return {"error": str(e)}
+
+    return {
+        "transport": section(handle_transport_get_status),
+        "tempo": section(mixer.getCurrentTempo),
+        "patterns": section(_snapshot_patterns),
+        "channels": section(lambda: handle_channels_get_all()["channels"]),
+        "mixer_tracks": section(
+            lambda: handle_mixer_get_all_tracks({"include_empty": False})["tracks"]
+        ),
+    }
+
+
 def write_response(response: dict):
-    """Write response to JSON file."""
+    """Write the response file in place.
+
+    Never via a temp file + os.replace: in FL Studio 2026 os.replace returns
+    NULL without setting an exception and leaves the embedded interpreter
+    failing every later call. Serialise first so a bad value cannot truncate
+    the file; the server only accepts a response carrying its own request id.
+    """
     try:
-        RESPONSE_FILE.write_text(json.dumps(response, indent=2))
+        text = json.dumps(response, indent=2)
+    except Exception as e:
+        print(f"Error serialising response: {e}")
+        return
+    try:
+        RESPONSE_FILE.write_text(text)
     except Exception as e:
         print(f"Error writing response: {e}")
 
@@ -497,6 +557,10 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_transport_set_loop_mode(params)
     elif action == "transport.setPlaybackSpeed":
         return handle_transport_set_playback_speed(params)
+    elif action == "transport.getTempo":
+        return handle_transport_get_tempo()
+    elif action == "transport.setTempo":
+        return handle_transport_set_tempo(params)
 
     # Mixer commands
     elif action == "mixer.getTrackCount":
@@ -618,6 +682,9 @@ def dispatch_command(action: str, params: dict) -> dict:
     elif action == "plugins.getColor":
         return handle_plugins_get_color(params)
 
+    elif action == "project.snapshot":
+        return handle_project_snapshot(params)
+
     else:
         return {"error": f"Unknown action: {action}"}
 
@@ -690,6 +757,34 @@ def handle_transport_set_playback_speed(params: dict) -> dict:
     speed = params.get("speed", 1.0)
     transport.setPlaybackSpeed(speed)
     return {"speed": speed}
+
+
+TEMPO_MIN = 10.0
+TEMPO_MAX = 522.0
+
+
+def handle_transport_get_tempo() -> dict:
+    """Current project tempo in BPM."""
+    return {"tempo": mixer.getCurrentTempo()}
+
+
+def handle_transport_set_tempo(params: dict) -> dict:
+    """Set the project tempo through the REC event (the only scripting route).
+
+    processRECEvent is documented as fragile, so the tempo is read back and
+    `applied` tells the caller whether FL Studio really took the value.
+    """
+    bpm = float(params.get("bpm", 0))
+    if not TEMPO_MIN <= bpm <= TEMPO_MAX:
+        return {"error": "Tempo %g out of range (%g..%g BPM)" % (bpm, TEMPO_MIN, TEMPO_MAX)}
+    general = _general_mod()
+    general.processRECEvent(
+        midi.REC_Tempo,
+        int(round(bpm * 1000)),
+        midi.REC_Control | midi.REC_UpdateValue | midi.REC_UpdateControl,
+    )
+    current = mixer.getCurrentTempo()
+    return {"requested": bpm, "tempo": current, "applied": abs(current - bpm) < 0.01}
 
 
 # =============================================================================

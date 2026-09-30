@@ -19,6 +19,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastmcp.exceptions import ToolError
+
+from fl_studio_mcp.utils.errors import run
+
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
@@ -27,7 +31,7 @@ WINDOW_NAMES = ("mixer", "channel_rack", "playlist", "piano_roll", "browser")
 
 def _window_error(window: str) -> str | None:
     if window not in WINDOW_NAMES:
-        return f"Error: unknown window '{window}'. Valid: {', '.join(WINDOW_NAMES)}"
+        return f"unknown window '{window}'. Valid: {', '.join(WINDOW_NAMES)}"
     return None
 
 
@@ -43,8 +47,7 @@ def register_ui_tools(mcp: FastMCP) -> None:
         caption and form id. Note that FL does not include the target channel
         in the piano roll's caption; use fl_open_piano_roll to set it.
         """
-        conn = get_connection()
-        return conn.send_command("ui.getFocus")
+        return run(get_connection(), "ui.getFocus")
 
     @mcp.tool()
     def fl_show_window(window: str = "piano_roll", focus: bool = True) -> dict:
@@ -55,17 +58,15 @@ def register_ui_tools(mcp: FastMCP) -> None:
             focus: also make it FL's focused window (default True)
         """
         if error := _window_error(window):
-            return {"error": error}
-        conn = get_connection()
-        return conn.send_command("ui.showWindow", {"window": window, "focus": focus})
+            raise ToolError(error)
+        return run(get_connection(), "ui.showWindow", {"window": window, "focus": focus})
 
     @mcp.tool()
     def fl_hide_window(window: str) -> dict:
         """Hide an FL Studio window (mixer, channel_rack, playlist, piano_roll, browser)."""
         if error := _window_error(window):
-            return {"error": error}
-        conn = get_connection()
-        return conn.send_command("ui.hideWindow", {"window": window})
+            raise ToolError(error)
+        return run(get_connection(), "ui.hideWindow", {"window": window})
 
     @mcp.tool()
     def fl_focus_window(window: str = "piano_roll") -> dict:
@@ -75,9 +76,8 @@ def register_ui_tools(mcp: FastMCP) -> None:
             window: mixer, channel_rack, playlist, piano_roll or browser
         """
         if error := _window_error(window):
-            return {"error": error}
-        conn = get_connection()
-        return conn.send_command("ui.setFocus", {"window": window})
+            raise ToolError(error)
+        return run(get_connection(), "ui.setFocus", {"window": window})
 
     @mcp.tool()
     def fl_open_piano_roll(channel: int | None = None) -> dict:
@@ -91,7 +91,6 @@ def register_ui_tools(mcp: FastMCP) -> None:
         is left unchanged. Returns the selected channel and focus state.
         """
         if channel is not None and (isinstance(channel, bool) or channel < 0):
-            return {"error": f"Error: channel must be a non-negative global index, got {channel!r}"}
-        conn = get_connection()
+            raise ToolError(f"channel must be a non-negative global index, got {channel!r}")
         params = {} if channel is None else {"index": channel}
-        return conn.send_command("pianoroll.open", params)
+        return run(get_connection(), "pianoroll.open", params)
