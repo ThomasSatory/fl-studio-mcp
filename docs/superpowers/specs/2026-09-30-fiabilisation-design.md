@@ -11,7 +11,7 @@ fl-studio-mcp pilote FL Studio depuis un client MCP. Deux canaux :
 - **MIDI + fichiers JSON** pour transport, mixer, canaux, plugins, patterns, undo, fenêtres : le serveur écrit `mcp_command.json`, envoie une note MIDI 127 sur un port virtuel, le contrôleur `device_FLStudioMCP.py` (Python embarqué de FL Studio) exécute l'API et écrit `mcp_response.json`.
 - **Fichiers JSON + raccourci clavier** pour le piano roll : le serveur écrit `mcp_request.json`, active FL Studio, envoie Cmd+Opt+Y, et le script `ComposeWithLLM.pyscript` (contexte Python séparé, module `flpianoroll`) applique les notes et exporte `piano_roll_state.json`.
 
-Usage cible : Claude Desktop ou Claude Code sur un Mac, compte personnel, transport stdio. Rapport à upstream : hybride, corrections de bugs en petites PR compatibles, nouveautés dans le fork.
+Usage cible : Claude Desktop ou Claude Code sur un Mac, compte personnel, transport stdio. Rapport à upstream : aucun envoi. Le fork est privé ; `upstream` reste un remote en lecture pour rebaser sur la PR #5 si elle évolue.
 
 Objectif : rendre le canal MIDI + fichiers déterministe (identifiant, verrou, port sûr), rendre le piano roll honnête sur macOS (pas de lancement de FL Studio à l'insu de l'utilisateur, pas de chevauchement), ajouter le tempo et une vue d'ensemble du projet, uniformiser les erreurs, tester sans FL Studio, corriger l'installateur.
 
@@ -29,12 +29,9 @@ Objectif : rendre le canal MIDI + fichiers déterministe (identifiant, verrou, p
 | Branche | Base | Contenu |
 |---|---|---|
 | `main` (fork) | upstream/main + PR #5 | socle, jamais modifié à la main |
-| `fiabilisation` | `main` | tout le travail du fork (sections 4 à 8) |
-| `fix/no-hardware-port-fallback` | `upstream/main` | PR upstream 1 : sélection stricte du port + variable d'environnement |
-| `fix/no-launch-fl-on-trigger` | `upstream/main` | PR upstream 2 : vérifier que FL Studio tourne avant de l'activer |
-| `fix/installer-absolute-uv` | `upstream/main` | PR upstream 3 : installateur (chemin absolu de uv, `claude mcp add`, détection IAC par ports MIDI, mode non interactif) |
+| `fiabilisation` | `main` | tout le travail (sections 4 à 9) |
 
-Les PR upstream réimplémentent sur `upstream/main` (sans PR #5) la même logique que la branche `fiabilisation`, en version minimale. Elles sont ouvertes en fin de chantier, après que la branche `fiabilisation` est verte.
+Dépôt privé `ThomasSatory/fl-studio-mcp`. Aucune branche n'est poussée vers `upstream` ; `git push` ne vise que `origin`.
 
 ## 4. Protocole MIDI + fichiers
 
@@ -107,10 +104,9 @@ Fichier : `src/fl_studio_mcp/utils/fl_trigger.py`, `src/fl_studio_mcp/tools/pian
 
 ## 8. Tests
 
-Répertoire `tests/`, pytest, sans FL Studio. Ajout de `tests/fakes.py` (adapté de la PR upstream #9) :
+Répertoire `tests/`, pytest, sans FL Studio. Ajout de `tests/fakes.py` (idée reprise de la PR upstream #9, fermée) :
 
 - `install_fl_fakes(monkeypatch)` : insère dans `sys.modules` des modules `channels`, `midi`, `mixer`, `plugins`, `transport`, `patterns`, `general`, `ui` sous forme de `MagicMock` configurés (valeurs de retour typées : `mixer.getCurrentTempo` → 120.0, `channels.channelCount` → 2, etc.) puis charge `fl_controller/device_FLStudioMCP.py` via `importlib` ;
-- `FakeScore`, `FakeNote` pour `flpianoroll`, permettant d'importer `ComposeWithLLM.pyscript` (chargé comme source, extension non standard).
 
 Tests à écrire :
 
@@ -150,6 +146,6 @@ Commandes : `uv run pytest -q`, `uv run ruff check src fl_controller tests`.
 6. Tempo.
 7. Snapshot.
 8. Installateur, README, version.
-9. Branches et PR upstream (trois).
+9. Push des branches `main` et `fiabilisation` sur le fork privé.
 
 Chaque étape : tests d'abord, implémentation, `pytest` et `ruff` verts, commit.
