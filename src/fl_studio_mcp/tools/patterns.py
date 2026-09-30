@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp.tools.annotations import ACTION, IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils.errors import run
 
 if TYPE_CHECKING:
@@ -31,7 +32,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
     """Register pattern management tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_list_patterns(include_default: bool = False) -> dict:
         """List all patterns in the project.
 
@@ -45,7 +46,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         """
         return run(get_connection(), "patterns.getAll", {"include_default": include_default})
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_select_pattern(index: int) -> str:
         """Select and activate a pattern (1-based index).
 
@@ -57,7 +58,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         result = run(get_connection(), "patterns.select", {"index": index})
         return f"Selected pattern {result.get('selected')} ({result.get('name')})"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_new_pattern() -> str:
         """Switch to the next empty pattern (automation-safe, no name prompt).
 
@@ -71,7 +72,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         result = run(get_connection(), "patterns.newEmpty", {})
         return f"Switched to empty pattern {result.get('selected')} ({result.get('name')})"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_clone_pattern(index: int | None = None) -> str:
         """Clone a pattern (default: the currently active one).
 
@@ -85,7 +86,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         result = run(get_connection(), "patterns.clone", params)
         return f"Cloned to pattern {result.get('cloned_to')} ({result.get('name')})"
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_rename_pattern(index: int, name: str) -> str:
         """Rename the pattern at index (1-based). Empty name resets to default."""
         if error := _index_error(index):

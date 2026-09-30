@@ -32,6 +32,7 @@ from fl_studio_mcp.tools import (
     register_transport_tools,
     register_ui_tools,
 )
+from fl_studio_mcp.tools.annotations import READ_ONLY
 from fl_studio_mcp.utils.connection import get_connection, reset_connection
 
 # Create the MCP server
@@ -97,7 +98,7 @@ def get_project_info() -> dict:
 
 
 # Connection management tools
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 def fl_connection_status(reconnect: bool = False) -> dict:
     """Get the FL Studio MIDI connection status.
 

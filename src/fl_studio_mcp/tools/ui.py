@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp.tools.annotations import IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils.errors import run
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ def register_ui_tools(mcp: FastMCP) -> None:
     """Register window/focus tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_focused_window() -> dict:
         """Report which FL Studio windows are visible and which one has focus.
 
@@ -49,7 +50,7 @@ def register_ui_tools(mcp: FastMCP) -> None:
         """
         return run(get_connection(), "ui.getFocus")
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_show_window(window: str = "piano_roll", focus: bool = True) -> dict:
         """Show an FL Studio window and (by default) give it FL-internal focus.
 
@@ -61,14 +62,14 @@ def register_ui_tools(mcp: FastMCP) -> None:
             raise ToolError(error)
         return run(get_connection(), "ui.showWindow", {"window": window, "focus": focus})
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_hide_window(window: str) -> dict:
         """Hide an FL Studio window (mixer, channel_rack, playlist, piano_roll, browser)."""
         if error := _window_error(window):
             raise ToolError(error)
         return run(get_connection(), "ui.hideWindow", {"window": window})
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_focus_window(window: str = "piano_roll") -> dict:
         """Give an FL Studio window FL-internal focus without changing visibility.
 
@@ -79,7 +80,7 @@ def register_ui_tools(mcp: FastMCP) -> None:
             raise ToolError(error)
         return run(get_connection(), "ui.setFocus", {"window": window})
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_open_piano_roll(channel: int | None = None) -> dict:
         """Retarget the piano roll to a channel and make it FL's focused window.
 

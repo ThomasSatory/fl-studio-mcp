@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp.tools.annotations import ACTION, DESTRUCTIVE, READ_ONLY
 from fl_studio_mcp.utils.fl_trigger import FLProbeError, get_trigger
 from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
 from fl_studio_mcp.utils.music import chord_to_midi, midi_to_note_name, note_to_midi
@@ -519,7 +520,7 @@ def _checked_response(outcome: dict, notes_sent: list[dict] | None = None) -> tu
 def register_piano_roll_tools(mcp: FastMCP) -> None:
     """Register piano roll tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(annotations=DESTRUCTIVE)
     def fl_send_notes(notes: list[dict], mode: str = "add", auto_trigger: bool = True) -> str:
         """Add or replace notes in the open FL Studio piano roll.
 
@@ -564,7 +565,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             f"{_note_count_text(response)}{warning}"
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_send_chord(
         chord: str | list[int | str],
         octave: int = 4,
@@ -622,7 +623,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             f"{_note_count_text(response)}{warning}"
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=DESTRUCTIVE)
     def fl_delete_notes(notes: list[dict], auto_trigger: bool = True) -> str:
         """Delete notes from the open piano roll, matched by pitch and start time.
 
@@ -645,7 +646,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             f"{_note_count_text(response)}{warning}"
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=DESTRUCTIVE)
     def fl_clear_piano_roll(auto_trigger: bool = True) -> str:
         """Delete every note in the open piano roll.
 
@@ -663,7 +664,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             f"{_note_count_text(response)}{warning}"
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_piano_roll_state() -> dict:
         """Get the current state of notes in the FL Studio piano roll.
 
@@ -690,7 +691,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
 
         return state
 
-    @mcp.tool()
+    @mcp.tool(annotations=DESTRUCTIVE)
     def fl_clear_request_queue() -> str:
         """Clear any pending note requests without executing them.
 
@@ -699,7 +700,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         _clear_request_file()
         return "Request queue cleared."
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_trigger_script() -> str:
         """Run the ComposeWithLLM piano roll script on the queued requests.
 
@@ -713,7 +714,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             return "FL Studio ran the piano roll script (nothing was queued)."
         return f"{_describe_run(outcome)}{_note_count_text(response)}{warning}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_pr_context() -> dict:
         """Get context of the currently open piano roll (read-only).
 
@@ -750,7 +751,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             )
         return _enrich_pr_context(context)
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_piano_roll_info() -> dict:
         """Get information about the Piano Roll integration status.
 

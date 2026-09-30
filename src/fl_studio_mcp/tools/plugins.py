@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fl_studio_mcp.tools.annotations import ACTION, IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils.errors import run
 
 if TYPE_CHECKING:
@@ -18,7 +19,7 @@ def register_plugin_tools(mcp: FastMCP) -> None:
     """Register plugin control tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_plugin_params(
         index: int,
         slot_index: int = -1,
@@ -47,7 +48,7 @@ def register_plugin_tools(mcp: FastMCP) -> None:
         keys = ("valid", "name", "param_count", "preset_count", "color", "params")
         return {key: result[key] for key in keys if key in result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_plugin_param_value(
         param_index: int,
         plugin_index: int,
@@ -76,7 +77,7 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             "value_string": result.get("value_string", ""),
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_plugin_param_value(
         param_index: int,
         value: float,
@@ -106,7 +107,7 @@ def register_plugin_tools(mcp: FastMCP) -> None:
         value_str = result.get("value_string", "")
         return f"Parameter '{name}' set to {new_value:.4f} ({value_str})"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_next_preset(
         index: int,
         slot_index: int = -1,
@@ -128,7 +129,7 @@ def register_plugin_tools(mcp: FastMCP) -> None:
         plugin_name = result.get("plugin_name", "Plugin")
         return f"Switched '{plugin_name}' to next preset"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_prev_preset(
         index: int,
         slot_index: int = -1,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fl_studio_mcp.tools.annotations import READ_ONLY
 from fl_studio_mcp.utils.errors import run
 
 if TYPE_CHECKING:
@@ -20,7 +21,7 @@ def register_project_tools(mcp: FastMCP) -> None:
     """Register project-level tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_project_snapshot() -> dict:
         """Get a one-call overview of the open project.
 

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp.tools.annotations import ACTION, DESTRUCTIVE, READ_ONLY
 from fl_studio_mcp.utils.errors import run
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ def register_history_tools(mcp: FastMCP) -> None:
     """Register undo/redo tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_save_undo_point(
         name: str = "MCP undo point",
         flags: list[str] | None = None,
@@ -73,7 +74,7 @@ def register_history_tools(mcp: FastMCP) -> None:
             )
         return run(get_connection(), "general.saveUndoPoint", {"name": name, "flags": flags})
 
-    @mcp.tool()
+    @mcp.tool(annotations=DESTRUCTIVE)
     def fl_undo() -> dict:
         """Undo the last change (classic undo, like Ctrl+Z).
 
@@ -83,12 +84,12 @@ def register_history_tools(mcp: FastMCP) -> None:
         """
         return run(get_connection(), "general.undo")
 
-    @mcp.tool()
+    @mcp.tool(annotations=DESTRUCTIVE)
     def fl_redo() -> dict:
         """Redo the last undone change."""
         return run(get_connection(), "general.redo")
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_undo_status() -> dict:
         """Get undo history status (count, position, hints, project-changed flag)."""
         return run(get_connection(), "general.getUndoStatus")

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp.tools.annotations import ACTION, IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils.errors import run
 
 if TYPE_CHECKING:
@@ -20,7 +21,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
     """Register transport control tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_play() -> str:
         """Start or pause FL Studio playback.
 
@@ -32,7 +33,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
         is_playing = result.get("is_playing", False)
         return f"Playback {'started' if is_playing else 'paused'}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_stop() -> str:
         """Stop FL Studio playback completely.
 
@@ -42,7 +43,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
 
         return "Playback stopped"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_record() -> str:
         """Toggle recording mode in FL Studio.
 
@@ -53,7 +54,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
         is_recording = result.get("is_recording", False)
         return f"Recording {'enabled' if is_recording else 'disabled'}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_transport_status() -> dict:
         """Get current transport status including playback and recording state.
 
@@ -69,7 +70,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
             "loop_mode": result.get("loop_mode", "pattern"),
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_song_position(position: float, mode: int = 2) -> str:
         """Set the playback position in FL Studio.
 
@@ -90,7 +91,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
         new_pos = result.get("position", "")
         return f"Position set to {new_pos}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_song_length() -> dict:
         """Get the total length of the current song/pattern.
 
@@ -104,7 +105,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
             "milliseconds": result.get("milliseconds", 0),
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_loop_mode(mode: str) -> str:
         """Set the loop mode between pattern and song.
 
@@ -118,7 +119,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
 
         return f"Loop mode set to {mode}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_playback_speed(speed: float) -> str:
         """Set the playback speed multiplier.
 
@@ -133,13 +134,13 @@ def register_transport_tools(mcp: FastMCP) -> None:
 
         return f"Playback speed set to {speed}x"
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_tempo() -> dict:
         """Get the project tempo in BPM."""
         result = run(get_connection(), "transport.getTempo")
         return {"tempo": result.get("tempo")}
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_tempo(bpm: float) -> dict:
         """Set the project tempo in BPM (10 to 522).
 

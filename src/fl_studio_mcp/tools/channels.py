@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp.tools.annotations import ACTION, DESTRUCTIVE, IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils.errors import run
 
 if TYPE_CHECKING:
@@ -16,7 +17,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
     """Register channel rack tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_channel_info(index: int, use_global_index: bool = True) -> dict:
         """Get detailed information about a channel.
 
@@ -42,7 +43,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
             "target_fx_track": result.get("target_fx_track", 0),
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_all_channels() -> list[dict]:
         """List every channel in the channel rack.
 
@@ -54,7 +55,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
         return result.get("channels", [])
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_select_channel(index: int, select: bool = True, exclusive: bool = False) -> str:
         """Select or deselect a channel.
 
@@ -78,7 +79,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         channel_name = result.get("channel_name", f"Channel {index}")
         return f"Channel '{channel_name}' {'selected' if select else 'deselected'}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_trigger_note(
         channel: int,
         note: int,
@@ -119,7 +120,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
             f" on channel {channel}"
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_channel_volume(index: int, volume: float) -> str:
         """Set the volume of a channel.
 
@@ -139,7 +140,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         new_volume = result.get("volume", volume)
         return f"Channel '{channel_name}' volume set to {new_volume:.2f}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_channel_pan(index: int, pan: float) -> str:
         """Set the pan position of a channel.
 
@@ -159,7 +160,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         new_pan = result.get("pan", pan)
         return f"Channel '{channel_name}' pan set to {new_pan:.2f}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_mute_channel(index: int, muted: bool | None = None) -> str:
         """Mute or unmute a channel.
 
@@ -176,7 +177,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         channel_name = result.get("channel_name", f"Channel {index}")
         return f"Channel '{channel_name}' {'muted' if is_muted else 'unmuted'}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ACTION)
     def fl_solo_channel(index: int, solo: bool | None = None) -> str:
         """Solo or unsolo a channel.
 
@@ -193,7 +194,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         channel_name = result.get("channel_name", f"Channel {index}")
         return f"Channel '{channel_name}' {'soloed' if is_solo else 'unsoloed'}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_channel_name(index: int, name: str) -> str:
         """Set the name of a channel.
 
@@ -208,7 +209,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
         return f"Channel {index} renamed to '{name}'"
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_channel_color(index: int, red: int, green: int, blue: int) -> str:
         """Set the color of a channel.
 
@@ -227,7 +228,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
         return f"Channel {index} color set to RGB({red}, {green}, {blue})"
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_route_channel_to_mixer(channel_index: int, mixer_track: int) -> str:
         """Route a channel to a specific mixer track.
 
@@ -245,7 +246,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
     # Step Sequencer Tools
 
-    @mcp.tool()
+    @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_grid_bit(channel: int, position: int, value: bool) -> str:
         """Set a step in the step sequencer on or off.
 
@@ -265,7 +266,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         channel_name = result.get("channel_name", f"Channel {channel}")
         return f"Channel '{channel_name}' step {position} {'enabled' if value else 'disabled'}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     def fl_get_step_sequence(channel: int, steps: int = 16) -> list[bool]:
         """Get the step sequence pattern for a channel.
 
@@ -280,7 +281,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
         return result.get("sequence", [])
 
-    @mcp.tool()
+    @mcp.tool(annotations=DESTRUCTIVE)
     def fl_set_step_sequence(channel: int, pattern: list[bool]) -> str:
         """Set a complete step sequence pattern for a channel.
 
