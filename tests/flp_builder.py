@@ -48,3 +48,13 @@ def build_project(clips: list[tuple[int, int, int, int]] | None = None) -> Proje
         Event(47, 0),
     ]
     return Project(header, events)
+
+
+def add_mixer(project: Project, routes: list[list[int]], flags: int = 0x4C) -> None:
+    """Append one 236 (flags) + 235 (routing) event pair per insert; routes[i] = destinations."""
+    for dests in routes:
+        project.events.append(Event(236, bytes(4) + struct.pack("<I", flags) + bytes(4)))
+        raw = bytearray(max(dests) + 1) if dests else bytearray(1)
+        for d in dests:
+            raw[d] = 1
+        project.events.append(Event(235, bytes(raw)))

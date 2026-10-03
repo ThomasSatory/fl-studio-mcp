@@ -36,6 +36,8 @@ EV_FL_VERSION = 199
 EV_CHANNEL_NAME = 203
 EV_MARKER_NAME = 205
 EV_PLAYLIST_ITEMS = 233
+EV_INSERT_ROUTING = 235
+EV_INSERT_FLAGS = 236
 EV_TRACK_DATA = 238
 EV_TRACK_NAME = 239
 EV_ARRANGEMENT_NAME = 241
@@ -699,3 +701,80 @@ def sample_paths(project: Project) -> dict[int, str]:
             if ev.id == EV_CHANNEL_SAMPLE_PATH:
                 paths[channel] = decode_text(bytes(ev.value))
     return paths
+
+
+INSERT_ENABLED = 0x08
+
+
+def insert_count(project: Project) -> int:
+    """Number of mixer inserts in the file (Master included), i.e. the 236 events."""
+    return sum(1 for e in project.events if e.id == EV_INSERT_FLAGS)
+
+
+def mixer_routes(project: Project) -> dict[int, set[int]]:
+    """insert index -> destination inserts, from the 235 events (in file order)."""
+    routes: dict[int, set[int]] = {}
+    for index, event in enumerate(e for e in project.events if e.id == EV_INSERT_ROUTING):
+        routes[index] = {dest for dest, flag in enumerate(event.value) if flag}
+    return routes
+
+
+def disable_inserts(project: Project, indices) -> None:
+    """Clear the Enabled bit of these inserts. FLPError for 0 (Master), for the last
+    insert (FL 2025's 'Current' track: disabling it makes the render write nothing),
+    for an index out of range, or when the file has no 236 events."""
+    flags = [e for e in project.events if e.id == EV_INSERT_FLAGS]
+    if not flags:
+        raise FLPError("the project has no mixer insert events")
+    wanted = set(indices)
+    for index in sorted(wanted):
+        if index == 0:
+            raise FLPError("cannot disable the Master insert")
+        if index == len(flags) - 1:
+            raise FLPError(f"cannot disable insert {index}: it is the 'Current' track")
+        if not 0 <= index < len(flags):
+            raise FLPError(f"insert {index} out of range (0..{len(flags) - 1})")
+    for index in wanted:
+        event = flags[index]
+        raw = bytearray(event.value)
+        value = struct.unpack_from("<I", raw, 4)[0] & ~INSERT_ENABLED
+        struct.pack_into("<I", raw, 4, value)
+        event.value = bytes(raw)
+
+
+def stem_keep_set(routes: dict[int, set[int]], target: int) -> set[int]:
+    """{0, target} | inserts whose signal reaches target | inserts reached from target."""
+    keep = {0, target}
+    # upstream: walk the routes backwards from the target
+    stack = [target]
+    while stack:
+        node = stack.pop()
+        for source, dests in routes.items():
+            if node in dests and source not in keep:
+                keep.add(source)
+                stack.append(source)
+    # downstream: follow the routes forwards from the target
+    stack = [target]
+    seen = {target}
+    while stack:
+        node = stack.pop()
+        for dest in routes.get(node, ()):
+            if dest not in seen:
+                seen.add(dest)
+                keep.add(dest)
+                stack.append(dest)
+    return keep
+
+
+def stem_project_bytes(data: bytes, target: int) -> bytes:
+    """A copy of the project where every insert outside stem_keep_set(target) is disabled.
+    Never touches 0 or the last insert. FLPError if target is 0, the last insert or out of range."""
+    project = Project.parse(data)
+    count = insert_count(project)
+    if count == 0:
+        raise FLPError("the project has no mixer insert events")
+    if not 0 < target < count - 1:
+        raise FLPError(f"insert {target} cannot be soloed (valid: 1..{count - 2})")
+    keep = stem_keep_set(mixer_routes(project), target)
+    disable_inserts(project, [i for i in range(1, count - 1) if i not in keep])
+    return project.to_bytes()
