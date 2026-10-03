@@ -59,6 +59,17 @@ RESPONSE_FILE = SCRIPT_DIR / "mcp_response.json"
 # MIDI trigger note
 TRIGGER_NOTE = 127
 
+# Bumped whenever an action is added or changes; the MCP server reads it via
+# system.info to detect an outdated script installed in FL Studio.
+CONTROLLER_VERSION = 3
+
+# Project loads seen since the script started (OnProjectLoad), so the server
+# can wait for a reload it requested. The instance id changes when FL reloads
+# the script itself, which resets the counter.
+_load_count = 0
+_last_load_status = None
+_instance_id = "%x" % id(object())
+
 
 def OnInit():
     """Called when the script is loaded."""
@@ -70,6 +81,14 @@ def OnInit():
 def OnDeInit():
     """Called when the script is unloaded."""
     print("FL Studio MCP Controller deinitialized")
+
+
+def OnProjectLoad(status):
+    """Count finished project loads (midi.PL_LoadOk = 100, PL_LoadError = 101)."""
+    global _load_count, _last_load_status
+    if status in (100, 101):
+        _load_count += 1
+        _last_load_status = "ok" if status == 100 else "error"
 
 
 def OnMidiMsg(event):
@@ -349,6 +368,8 @@ def handle_patterns_new_empty(params: dict) -> dict:
         FFNEP_DontPromptName = 1 << 1  # from midi module flags
         patterns.findFirstNextEmptyPat(FFNEP_DontPromptName)
         i = patterns.patternNumber()
+        if params.get("name"):
+            patterns.setPatternName(i, str(params["name"]))
         return {"selected": i, "name": patterns.getPatternName(i)}
     except ImportError:
         return {"error": "patterns module not available (requires FL Studio 2024+)"}
@@ -685,6 +706,9 @@ def dispatch_command(action: str, params: dict) -> dict:
     elif action == "project.snapshot":
         return handle_project_snapshot(params)
 
+    elif action in _EXTRA_HANDLERS:
+        return _EXTRA_HANDLERS[action](params)
+
     else:
         return {"error": f"Unknown action: {action}"}
 
@@ -723,20 +747,47 @@ def handle_transport_get_status() -> dict:
     }
 
 
+# transport.getSongLength / getSongPos / setSongPos modes (midi.SONGLENGTH_*).
+SONGLENGTH_MS = 0
+SONGLENGTH_S = 1
+SONGLENGTH_ABSTICKS = 2
+SONGLENGTH_BARS = 3
+SONGLENGTH_STEPS = 4
+SONGLENGTH_TICKS = 5
+
+
+def _ppq() -> int:
+    try:
+        return int(_general_mod().getRecPPQ())
+    except Exception:
+        return 96
+
+
 def handle_transport_set_position(params: dict) -> dict:
-    """Set playback position."""
-    position = params.get("position", 0)
-    mode = params.get("mode", 2)  # Default: seconds
-    transport.setSongPos(position, mode)
-    return {"position": transport.getSongPosHint()}
+    """Set the playback position from absolute ticks or seconds (both int for FL)."""
+    if "ticks" in params:
+        transport.setSongPos(int(round(params["ticks"])), SONGLENGTH_ABSTICKS)
+    elif "seconds" in params:
+        transport.setSongPos(int(round(params["seconds"] * 1000)), SONGLENGTH_MS)
+    else:
+        return {"error": "setPosition needs 'ticks' or 'seconds'"}
+    return {
+        "position": transport.getSongPosHint(),
+        "ticks": transport.getSongPos(SONGLENGTH_ABSTICKS),
+        "ppq": _ppq(),
+    }
 
 
 def handle_transport_get_length() -> dict:
-    """Get song length."""
+    """Song length in every unit FL reports (song mode arrangement, not the pattern)."""
     return {
-        "ticks": transport.getSongLength(3),
-        "seconds": transport.getSongLength(2),
-        "milliseconds": transport.getSongLength(1),
+        "ticks": transport.getSongLength(SONGLENGTH_ABSTICKS),
+        "seconds": transport.getSongLength(SONGLENGTH_S),
+        "milliseconds": transport.getSongLength(SONGLENGTH_MS),
+        "bars": transport.getSongLength(SONGLENGTH_BARS),
+        "steps": transport.getSongLength(SONGLENGTH_STEPS),
+        "bar_ticks": transport.getSongLength(SONGLENGTH_TICKS),
+        "ppq": _ppq(),
     }
 
 
@@ -851,23 +902,39 @@ def handle_mixer_get_all_tracks(params: dict) -> dict:
     return {"track_count": track_count, "tracks": tracks}
 
 
+def _set_track_db(track: int, target_db: float) -> None:
+    """Bisect the fader position that gives target_db (FL's curve is not linear)."""
+    lo, hi = 0.0, 1.0
+    for _ in range(30):
+        mid = (lo + hi) / 2
+        mixer.setTrackVolume(track, mid, midi.PIM_None)
+        if mixer.getTrackVolume(track, 1) < target_db:
+            lo = mid
+        else:
+            hi = mid
+    mixer.setTrackVolume(track, hi, midi.PIM_None)
+
+
 def handle_mixer_set_track_volume(params: dict) -> dict:
-    """Set mixer track volume."""
-    track = params.get("track", 0)
-    volume = params.get("volume", 0.8)
-    mixer.setTrackVolume(track, volume)
+    """Set mixer track volume (0-1 fader position, or 'db'); pickup mode off."""
+    track = int(params.get("track", 0))
+    if "db" in params:
+        _set_track_db(track, float(params["db"]))
+    else:
+        # Explicit PIM_None: with pickup (takeover) FL ignores a jump in value.
+        mixer.setTrackVolume(track, float(params.get("volume", 0.8)), midi.PIM_None)
     return {
         "volume": mixer.getTrackVolume(track),
         "volume_db": mixer.getTrackVolume(track, 1),
+        "track_name": mixer.getTrackName(track),
     }
 
 
 def handle_mixer_set_track_pan(params: dict) -> dict:
-    """Set mixer track pan."""
-    track = params.get("track", 0)
-    pan = params.get("pan", 0.0)
-    mixer.setTrackPan(track, pan)
-    return {"pan": mixer.getTrackPan(track)}
+    """Set mixer track pan (-1..1); pickup mode off."""
+    track = int(params.get("track", 0))
+    mixer.setTrackPan(track, float(params.get("pan", 0.0)), midi.PIM_None)
+    return {"pan": mixer.getTrackPan(track), "track_name": mixer.getTrackName(track)}
 
 
 def handle_mixer_mute_track(params: dict) -> dict:
@@ -964,11 +1031,43 @@ def handle_channels_get_info(params: dict) -> dict:
         "volume": channels.getChannelVolume(index, useGlobalIndex=use_global),
         "pan": channels.getChannelPan(index, use_global),
         "pitch": channels.getChannelPitch(index, useGlobalIndex=use_global),
+        **_channel_pitch_detail(index, use_global),
         "is_muted": channels.isChannelMuted(index, use_global) == 1,
         "is_solo": channels.isChannelSolo(index, use_global) == 1,
         "is_selected": channels.isChannelSelected(index, use_global) == 1,
         "target_fx_track": channels.getTargetFxTrack(index, use_global),
+        **(_channel_kind(index) if use_global else {}),
     }
+
+
+def _channel_pitch_detail(index, use_global) -> dict:
+    """Pitch knob in cents and its range in semitones (pitch alone is -1..1)."""
+    try:
+        return {"pitch_cents": channels.getChannelPitch(index, 1, use_global),
+                "pitch_range": channels.getChannelPitch(index, 2, use_global)}
+    except Exception:  # older API: mode not supported
+        return {}
+
+
+# channels.getChannelType() values (midi.CT_*).
+_CHANNEL_TYPES = {0: "sampler", 1: "hybrid", 2: "plugin", 3: "layer", 4: "audio_clip",
+                  5: "automation_clip"}
+
+
+def _channel_kind(index: int) -> dict:
+    """Channel type and, for a generator plugin, its name (best effort)."""
+    out = {}
+    try:
+        kind = channels.getChannelType(index, True)
+        out["type"] = _CHANNEL_TYPES.get(kind, "unknown")
+    except Exception:
+        return out
+    try:
+        if kind in (1, 2) and plugins.isValid(index, -1, True):
+            out["plugin"] = plugins.getPluginName(index, -1, False, True)
+    except Exception:
+        pass
+    return out
 
 
 def handle_channels_get_all() -> dict:
@@ -978,6 +1077,7 @@ def handle_channels_get_all() -> dict:
 
     for i in range(count):
         channels_list.append({
+            **_channel_kind(i),
             "index": i,
             "name": channels.getChannelName(i, True),
             "volume": channels.getChannelVolume(i, useGlobalIndex=True),
@@ -1389,3 +1489,511 @@ def handle_plugins_get_color(params: dict) -> dict:
         color = plugins.getColor(index, -1, useGlobalIndex=use_global)
 
     return {"color": hex(color)}
+
+
+# =============================================================================
+# System / project handlers
+# =============================================================================
+
+
+def _playlist_mod():
+    import playlist  # noqa: PLC0415
+    return playlist
+
+
+def _arrangement_mod():
+    import arrangement  # noqa: PLC0415
+    return arrangement
+
+
+def handle_system_info(params: dict) -> dict:
+    """Script version, API/FL versions, window title, changed flag and load counter."""
+    general = _general_mod()
+    info = {
+        "controller_version": CONTROLLER_VERSION,
+        "instance_id": _instance_id,
+        "load_count": _load_count,
+        "last_load_status": _last_load_status,
+        "api_version": general.getVersion(),
+        "changed": general.getChangedFlag(),
+        "ppq": _ppq(),
+    }
+    try:
+        ui = _ui_mod()
+        info["fl_version"] = ui.getVersion(4)
+        info["title"] = ui.getProgTitle()
+    except Exception as e:
+        info["ui_error"] = str(e)
+    return info
+
+
+def handle_transport_save(params: dict) -> dict:
+    """Save the project (Ctrl+S), or save a new numbered version with new_version."""
+    general = _general_mod()
+    command = midi.FPT_SaveNew if params.get("new_version") else midi.FPT_Save
+    transport.globalTransport(command, 1)
+    return {"changed": general.getChangedFlag()}
+
+
+# =============================================================================
+# Mixer routing, effects and levels
+# =============================================================================
+
+
+def _track_error(track) -> str | None:
+    if not isinstance(track, int) or isinstance(track, bool):
+        return "track must be an integer, got %r" % (track,)
+    if track < 0 or track >= mixer.trackCount():
+        return "Mixer track %d out of range (0..%d)" % (track, mixer.trackCount() - 1)
+    return None
+
+
+def _routes_from(track: int) -> list:
+    routes = []
+    for dest in range(mixer.trackCount()):
+        if dest != track and mixer.getRouteSendActive(track, dest):
+            route = {"to": dest, "name": mixer.getTrackName(dest)}
+            try:
+                route["level"] = mixer.getRouteToLevel(track, dest)
+            except Exception:
+                pass  # API < 36
+            routes.append(route)
+    return routes
+
+
+def handle_mixer_get_routing(params: dict) -> dict:
+    """Where a track sends its signal (with levels on API 36+)."""
+    track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
+    return {"track": track, "name": mixer.getTrackName(track), "routes": _routes_from(track)}
+
+
+def handle_mixer_set_route(params: dict) -> dict:
+    """Create/remove a send from one mixer track to another, optionally with a level."""
+    source = params.get("source")
+    dest = params.get("dest")
+    for t in (source, dest):
+        error = _track_error(t)
+        if error:
+            return {"error": error}
+    if source == dest:
+        return {"error": "A track cannot be routed to itself"}
+    enabled = bool(params.get("enabled", True))
+    # The route only exists once FL has processed the routing change, and a
+    # level can only be set on an existing route.
+    mixer.setRouteTo(source, dest, enabled)
+    mixer.afterRoutingChanged()
+    level_applied = None
+    if enabled and params.get("level") is not None:
+        try:
+            mixer.setRouteToLevel(source, dest, float(params["level"]))
+            level_applied = mixer.getRouteToLevel(source, dest)
+        except Exception as e:
+            return {"error": "Route %s, but its level could not be set (FL API 36+ "
+                    "needed): %s" % ("created" if mixer.getRouteSendActive(source, dest)
+                                     else "not created", e)}
+    return {
+        "source": source,
+        "dest": dest,
+        "active": bool(mixer.getRouteSendActive(source, dest)),
+        "level": level_applied,
+        "routes": _routes_from(source),
+    }
+
+
+def handle_mixer_get_effects(params: dict) -> dict:
+    """The 10 effect slots of a mixer track: plugin name, parameter count."""
+    track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
+    slots = []
+    for slot in range(10):
+        if not plugins.isValid(track, slot, True):
+            continue
+        slots.append({
+            "slot": slot,
+            "plugin": plugins.getPluginName(track, slot, False, True),
+            "name": plugins.getPluginName(track, slot, True, True),
+            "param_count": plugins.getParamCount(track, slot, True),
+        })
+    enabled = None
+    try:
+        enabled = bool(mixer.isTrackSlotsEnabled(track))
+    except Exception:
+        pass
+    return {"track": track, "name": mixer.getTrackName(track), "slots_enabled": enabled,
+            "effects": slots}
+
+
+def handle_mixer_get_peaks(params: dict) -> dict:
+    """Current peak (max of L/R, 1.0 = 0 dBFS) of the given tracks, or all of them."""
+    tracks = params.get("tracks")
+    if tracks is None:
+        tracks = list(range(mixer.trackCount()))
+    return {"peaks": {str(t): mixer.getTrackPeaks(t, 2) for t in tracks},
+            "playing": transport.isPlaying() == 1}
+
+
+# =============================================================================
+# Plugin parameters by name
+# =============================================================================
+
+
+def handle_plugins_set_param_by_name(params: dict) -> dict:
+    """Set a plugin parameter found by (case-insensitive) name instead of index."""
+    index, slot_index, use_global = _plugin_target(params)
+    wanted = str(params.get("name", "")).strip().lower()
+    if not wanted:
+        return {"error": "name is required"}
+    if not plugins.isValid(index, slot_index, use_global):
+        return {"error": "No plugin at this location"}
+    count = plugins.getParamCount(index, slot_index, use_global)
+    names = []
+    for i in range(count):
+        name = plugins.getParamName(i, index, slot_index, use_global)
+        if name:
+            names.append((i, name))
+    exact = [p for p in names if p[1].strip().lower() == wanted]
+    partial = [p for p in names if wanted in p[1].lower()]
+    matches = exact or partial
+    if not matches:
+        sample = ", ".join(n for _, n in names[:40])
+        return {"error": "No parameter named %r. Parameters: %s" % (params.get("name"), sample)}
+    if len(matches) > 1 and not exact:
+        return {"error": "%r is ambiguous: %s" % (
+            params.get("name"), ", ".join("%d=%s" % m for m in matches[:20]))}
+    param_index = matches[0][0]
+    value = float(params.get("value", 0.0))
+    plugins.setParamValue(value, param_index, index, slot_index, midi.PIM_None, use_global)
+    return {
+        "param_index": param_index,
+        "name": matches[0][1],
+        "value": plugins.getParamValue(param_index, index, slot_index, use_global),
+        "value_string": plugins.getParamValueString(
+            param_index, index, slot_index, useGlobalIndex=use_global),
+        "plugin": plugins.getPluginName(index, slot_index, useGlobalIndex=use_global),
+    }
+
+
+# =============================================================================
+# Step sequencer with per-step pitch, velocity, pan...
+# =============================================================================
+
+# midi.pPitch ... midi.pShift
+_STEP_PARAMS = {"pitch": 0, "velocity": 1, "release": 2, "fine_pitch": 3, "pan": 4,
+                "mod_x": 5, "mod_y": 6, "shift": 7}
+
+
+def _channel_error(index) -> str | None:
+    if not isinstance(index, int) or isinstance(index, bool):
+        return "channel must be an integer, got %r" % (index,)
+    count = channels.channelCount(True)
+    if index < 0 or index >= count:
+        return "Channel index %d out of range (0..%d)" % (index, count - 1)
+    return None
+
+
+def _select_pattern_param(params: dict):
+    """Jump to params['pattern'] when given; returns (pattern, error)."""
+    patterns = _patterns_mod()
+    pattern = params.get("pattern")
+    if pattern is None:
+        return patterns.patternNumber(), None
+    error = _pattern_index_error(patterns, int(pattern))
+    if error:
+        return None, error["error"]
+    if patterns.patternNumber() != int(pattern):
+        patterns.jumpToPattern(int(pattern))
+    return int(pattern), None
+
+
+def handle_channels_set_steps(params: dict) -> dict:
+    """Write steps with pitch/velocity/pan... into a channel of any pattern.
+
+    Unlike the piano roll this needs no keystroke: it goes through the step
+    sequencer (one note per 16th step and channel).
+    """
+    channel = params.get("channel")
+    error = _channel_error(channel)
+    if error:
+        return {"error": error}
+    pattern, error = _select_pattern_param(params)
+    if error:
+        return {"error": error}
+    steps = params.get("steps") or []
+    if params.get("clear", True):
+        pattern_steps = int(round(_patterns_mod().getPatternLength(pattern) * 4))
+        clear_to = max([pattern_steps] + [int(s["step"]) + 1 for s in steps])
+        for i in range(clear_to):
+            channels.setGridBit(channel, i, 0, True)
+    for s in steps:
+        step = int(s["step"])
+        channels.setGridBit(channel, step, 1, True)
+        for key, param_id in _STEP_PARAMS.items():
+            if key in s:
+                channels.setStepParameterByIndex(channel, pattern, step, param_id,
+                                                 int(s[key]), True)
+    try:
+        channels.updateGraphEditor()
+    except Exception:
+        pass
+    mismatched = []
+    for s in steps:
+        step = int(s["step"])
+        if not channels.getGridBit(channel, step, True):
+            mismatched.append({"step": step, "problem": "step is off"})
+            continue
+        if "pitch" in s:
+            got = channels.getCurrentStepParam(channel, step, 0, True)
+            if got != int(s["pitch"]):
+                mismatched.append({"step": step, "problem": "pitch %s != %s" % (got, s["pitch"])})
+    return {
+        "channel": channel,
+        "channel_name": channels.getChannelName(channel, True),
+        "pattern": pattern,
+        "steps_written": len(steps),
+        "mismatched": mismatched,
+    }
+
+
+def handle_channels_get_steps(params: dict) -> dict:
+    """Active steps of a channel (in a pattern) with their pitch/velocity/pan/shift."""
+    channel = params.get("channel")
+    error = _channel_error(channel)
+    if error:
+        return {"error": error}
+    pattern, error = _select_pattern_param(params)
+    if error:
+        return {"error": error}
+    count = int(params.get("steps", 0)) or max(
+        16, int(round(_patterns_mod().getPatternLength(pattern) * 4)))
+    step_ticks = _ppq() // 4
+    active = []
+    for step in range(count):
+        if channels.getGridBit(channel, step, True):
+            entry = {"step": step}
+            for key in ("pitch", "velocity", "pan", "shift"):
+                entry[key] = channels.getCurrentStepParam(channel, step, _STEP_PARAMS[key], True)
+            # FL reports the shift as the step's absolute tick position.
+            if entry["shift"] >= step * step_ticks:
+                entry["shift"] -= step * step_ticks
+            active.append(entry)
+    return {"channel": channel, "channel_name": channels.getChannelName(channel, True),
+            "pattern": pattern, "steps_scanned": count, "active": active}
+
+
+# =============================================================================
+# Patterns (colour, create with name)
+# =============================================================================
+
+
+def handle_patterns_set_color(params: dict) -> dict:
+    patterns = _patterns_mod()
+    index = int(params.get("index", 0))
+    error = _pattern_index_error(patterns, index)
+    if error:
+        return error
+    r, g, b = (int(params.get(k, 0)) for k in ("r", "g", "b"))
+    color = (r << 16) | (g << 8) | b
+    patterns.setPatternColor(index, color)
+    return {"index": index, "color": _rgb(patterns.getPatternColor(index))}
+
+
+# =============================================================================
+# Playlist tracks and markers (live API: clips themselves are not scriptable)
+# =============================================================================
+
+
+def _rgb(color: int) -> str:
+    """FL colours come back as signed ints; show them as #RRGGBB."""
+    return "#%06X" % (color & 0xFFFFFF)
+
+
+def _playlist_track_info(playlist, index: int) -> dict:
+    return {
+        "index": index,
+        "name": playlist.getTrackName(index),
+        "color": _rgb(playlist.getTrackColor(index)),
+        "is_muted": bool(playlist.isTrackMuted(index)),
+        "is_solo": bool(playlist.isTrackSolo(index)),
+    }
+
+
+def handle_playlist_get_tracks(params: dict) -> dict:
+    """Playlist tracks (1-based). Unnamed tracks are skipped unless include_empty."""
+    playlist = _playlist_mod()
+    count = playlist.trackCount()
+    limit = min(count, int(params.get("limit", count)))
+    tracks = []
+    for i in range(1, limit + 1):
+        info = _playlist_track_info(playlist, i)
+        default = info["name"] == "Track %d" % i
+        if default and not params.get("include_empty") and not info["is_muted"]:
+            continue
+        tracks.append(info)
+    return {"track_count": count, "tracks": tracks}
+
+
+def handle_playlist_set_track(params: dict) -> dict:
+    """Rename / colour / mute / solo one playlist track (1-based index)."""
+    playlist = _playlist_mod()
+    index = params.get("index")
+    if not isinstance(index, int) or index < 1 or index > playlist.trackCount():
+        return {"error": "Playlist track %r out of range (1..%d)" % (index, playlist.trackCount())}
+    if params.get("name") is not None:
+        playlist.setTrackName(index, str(params["name"]))
+    if params.get("color") is not None:
+        r, g, b = params["color"]
+        playlist.setTrackColor(index, (int(r) << 16) | (int(g) << 8) | int(b))
+    if params.get("muted") is not None:
+        playlist.muteTrack(index, 1 if params["muted"] else 0)
+    if params.get("solo") is not None:
+        playlist.soloTrack(index, 1 if params["solo"] else 0)
+    return _playlist_track_info(playlist, index)
+
+
+def handle_arrangement_add_marker(params: dict) -> dict:
+    """Add a time marker at an absolute tick position."""
+    arrangement = _arrangement_mod()
+    ticks = int(params.get("ticks", 0))
+    name = str(params.get("name", ""))
+    arrangement.addAutoTimeMarker(ticks, name)
+    return {"ticks": ticks, "name": name}
+
+
+_EXTRA_HANDLERS = {
+    "system.info": handle_system_info,
+    "transport.save": handle_transport_save,
+    "mixer.getRouting": handle_mixer_get_routing,
+    "mixer.setRoute": handle_mixer_set_route,
+    "mixer.getEffects": handle_mixer_get_effects,
+    "mixer.getPeaks": handle_mixer_get_peaks,
+    "plugins.setParamByName": handle_plugins_set_param_by_name,
+    "channels.setSteps": handle_channels_set_steps,
+    "channels.getSteps": handle_channels_get_steps,
+    "patterns.setColor": handle_patterns_set_color,
+    "playlist.getTracks": handle_playlist_get_tracks,
+    "playlist.setTrack": handle_playlist_set_track,
+    "arrangement.addMarker": handle_arrangement_add_marker,
+}
+
+
+# =============================================================================
+# Automation targets (REC event ids, as stored in automation clips)
+# =============================================================================
+
+# Offsets inside a mixer track's REC range (see midi.REC_Mixer_*).
+_EQ_KINDS = {"gain": 0, "freq": 8, "q": 16}
+
+
+def _find_param(index: int, slot: int, param) -> tuple:
+    """(param index, name) of a plugin parameter given by index or name."""
+    use_global = True
+    if not plugins.isValid(index, slot, use_global):
+        raise ValueError("No plugin at index %d slot %d" % (index, slot))
+    count = plugins.getParamCount(index, slot, use_global)
+    if isinstance(param, int) and not isinstance(param, bool):
+        if not 0 <= param < count:
+            raise ValueError("Parameter %d out of range (0..%d)" % (param, count - 1))
+        return param, plugins.getParamName(param, index, slot, use_global)
+    wanted = str(param).strip().lower()
+    names = [(i, plugins.getParamName(i, index, slot, use_global)) for i in range(count)]
+    exact = [n for n in names if n[1] and n[1].strip().lower() == wanted]
+    partial = [n for n in names if n[1] and wanted in n[1].lower()]
+    matches = exact or partial
+    if not matches:
+        raise ValueError("No parameter named %r" % (param,))
+    if len(matches) > 1 and not exact:
+        raise ValueError("%r is ambiguous: %s" % (param, ", ".join(
+            "%d=%s" % m for m in matches[:15])))
+    return matches[0]
+
+
+def _automation_target(target: dict) -> tuple:
+    """(REC event id, label) for a target description."""
+    kind = target.get("type")
+    if kind == "tempo":
+        return midi.REC_Tempo, "Tempo"
+    if kind in ("mixer_volume", "mixer_pan", "mixer_stereo", "mixer_eq", "effect_mix",
+                "effect_param"):
+        track = int(target.get("track", 0))
+        error = _track_error(track)
+        if error:
+            raise ValueError(error)
+        slot = int(target.get("slot", 0))
+        plugin_id = mixer.getTrackPluginId(track, slot if kind.startswith("effect") else 0)
+        track_name = mixer.getTrackName(track)
+        if kind == "mixer_volume":
+            return midi.REC_Mixer_Vol + plugin_id, "%s - Volume" % track_name
+        if kind == "mixer_pan":
+            return midi.REC_Mixer_Pan + plugin_id, "%s - Panning" % track_name
+        if kind == "mixer_stereo":
+            return midi.REC_Mixer_SS + plugin_id, "%s - Stereo separation" % track_name
+        if kind == "mixer_eq":
+            band = int(target.get("band", 0))
+            what = str(target.get("eq", "gain"))
+            if what not in _EQ_KINDS or not 0 <= band < 3:
+                raise ValueError("mixer_eq needs band 0-2 and eq gain|freq|q")
+            return (midi.REC_Mixer_EQ_Gain + _EQ_KINDS[what] + band + plugin_id,
+                    "%s - EQ band %d %s" % (track_name, band + 1, what))
+        if not plugins.isValid(track, slot, True):
+            raise ValueError("No effect in track %d slot %d" % (track, slot))
+        plugin_name = plugins.getPluginName(track, slot, True, True)
+        if kind == "effect_mix":
+            return midi.REC_Plug_MixLevel + plugin_id, "%s (%s) - Mix level" % (
+                plugin_name, track_name)
+        param, name = _find_param(track, slot, target.get("param", 0))
+        return (midi.REC_Plug_First + plugin_id + midi.REC_PluginBase + param,
+                "%s (%s) - %s" % (plugin_name, track_name, name))
+    if kind in ("channel_volume", "channel_pan", "channel_pitch", "channel_param"):
+        channel = target.get("channel")
+        error = _channel_error(channel)
+        if error:
+            raise ValueError(error)
+        base = channels.getRecEventId(channel, True)
+        name = channels.getChannelName(channel, True)
+        if kind == "channel_volume":
+            return base + midi.REC_Chan_Vol, "%s - Channel volume" % name
+        if kind == "channel_pan":
+            return base + midi.REC_Chan_Pan, "%s - Channel panning" % name
+        if kind == "channel_pitch":
+            return base + midi.REC_Chan_Pitch, "%s - Channel pitch" % name
+        param, pname = _find_param(channel, -1, target.get("param", 0))
+        return base + midi.REC_Chan_Plugin_First + param, "%s - %s" % (name, pname)
+    raise ValueError("unknown target type %r" % (kind,))
+
+
+def handle_automation_resolve(params: dict) -> dict:
+    """REC event ids and default clip names for a list of automation targets."""
+    out = []
+    for target in params.get("targets") or []:
+        try:
+            rec_id, label = _automation_target(target)
+        except Exception as e:
+            return {"error": "target %r: %s" % (target, e)}
+        entry = {"rec_id": rec_id, "label": label}
+        try:
+            entry["fl_name"] = mixer.getEventIDName(rec_id)
+            entry["current"] = mixer.remoteFindEventValue(rec_id)
+        except Exception:
+            pass
+        out.append(entry)
+    return {"targets": out}
+
+
+def handle_automation_describe(params: dict) -> dict:
+    """FL's name for REC event ids read from automation clips."""
+    names = {}
+    for rec_id in params.get("ids") or []:
+        try:
+            names[str(rec_id)] = mixer.getEventIDName(int(rec_id))
+        except Exception:
+            names[str(rec_id)] = None
+    return {"names": names}
+
+
+_EXTRA_HANDLERS["automation.resolve"] = handle_automation_resolve
+_EXTRA_HANDLERS["automation.describe"] = handle_automation_describe

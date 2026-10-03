@@ -331,8 +331,8 @@ retarget it before writing notes to a specific channel.
 | `fl_stop` | Stop playback |
 | `fl_record` | Toggle recording |
 | `fl_get_transport_status` | Get playback/recording state |
-| `fl_set_song_position` | Set playback position |
-| `fl_get_song_length` | Get song duration |
+| `fl_set_song_position` | Move the playhead by 1-based bar, seconds or ticks |
+| `fl_get_song_length` | Song length in seconds, ms, ticks and bars |
 | `fl_set_loop_mode` | Switch between pattern/song mode |
 | `fl_set_playback_speed` | Adjust playback speed (0.25x-4x) |
 | `fl_get_tempo` | Get the project tempo (BPM) |
@@ -344,14 +344,18 @@ retarget it before writing notes to a specific channel.
 |------|-------------|
 | `fl_get_mixer_track_info` | Get track details |
 | `fl_get_all_mixer_tracks` | Track count and used tracks |
-| `fl_set_track_volume` | Set track volume |
-| `fl_set_track_pan` | Set track pan |
+| `fl_set_track_volume` | Set track volume as fader position or in dB, verified by reading it back |
+| `fl_set_track_pan` | Set track pan, verified |
 | `fl_mute_track` | Mute/unmute track |
 | `fl_solo_track` | Solo/unsolo track |
 | `fl_arm_track` | Arm track for recording |
 | `fl_set_track_name` | Rename track |
 | `fl_set_track_color` | Set track color |
 | `fl_set_stereo_separation` | Adjust stereo width |
+| `fl_set_send` | Route a track to another one (sends / buses) with a level |
+| `fl_get_mixer_routing` | Where a track sends its signal |
+| `fl_list_effects` | Effects loaded in a track's slots |
+| `fl_get_mixer_levels` | Peak dBFS per track while playing; flags clipping and silent tracks |
 
 ### Channels
 
@@ -371,6 +375,17 @@ retarget it before writing notes to a specific channel.
 | `fl_set_grid_bit` | Set step sequencer step |
 | `fl_get_step_sequence` | Get full pattern |
 | `fl_set_step_sequence` | Set full pattern |
+| `fl_write_steps` | Step-sequencer notes with pitch, velocity, pan and shift, in any channel and pattern - no piano roll, no keystroke |
+| `fl_get_steps` | Active steps with their pitch/velocity/pan/shift |
+| `fl_add_sample_channels` | Add Sampler channels playing audio files from disk (project file edit + reload) |
+
+### Samples
+
+| Tool | Description |
+|------|-------------|
+| `fl_find_samples` | Search FL's browser folders (or a folder) by words and kind (kick, 808, hihat...) |
+| `fl_analyze_audio` | Peak/RMS dBFS, clipping, stereo width, low/mid/high balance, pitch (to tune 808s) |
+| `fl_preview_sample` | Play a file on the computer's speakers (macOS) |
 
 ### Plugins
 
@@ -378,7 +393,8 @@ retarget it before writing notes to a specific channel.
 |------|-------------|
 | `fl_get_plugin_params` | Plugin name, validity, presets, colour and parameters |
 | `fl_get_plugin_param_value` | Get parameter value |
-| `fl_set_plugin_param_value` | Set parameter value |
+| `fl_set_plugin_param_value` | Set parameter value by index |
+| `fl_set_plugin_param` | Set a parameter by its name ("Mix", "Cutoff") |
 | `fl_next_preset` | Next preset |
 | `fl_prev_preset` | Previous preset |
 
@@ -387,6 +403,31 @@ retarget it before writing notes to a specific channel.
 | Tool | Description |
 |------|-------------|
 | `fl_get_project_snapshot` | Transport, tempo, patterns, channels and mixer tracks in one call |
+| `fl_save_project` | Save (Ctrl+S) and return the .flp path |
+| `fl_open_project` | Open a .flp in the running FL Studio (e.g. a backup) |
+
+### Arrangement (playlist)
+
+| Tool | Description |
+|------|-------------|
+| `fl_get_arrangement` | Every clip (pattern, track, bar, length), markers and automation clips, read from the saved project |
+| `fl_edit_arrangement` | One batch of place / delete / copy / move clips and create or edit automation clips |
+| `fl_get_playlist_tracks` | Playlist track names, colours, mute, solo |
+| `fl_set_playlist_track` | Rename, colour, mute or solo a playlist track |
+| `fl_add_marker` | Add a time marker at a bar |
+
+FL Studio's scripting API cannot read or place playlist clips, create
+automation clips or load samples. `fl_get_arrangement`, `fl_edit_arrangement`
+and `fl_add_sample_channels` therefore work on the project file: they save
+the project (Ctrl+S), read the `.flp`, and for edits write the change into it
+and make FL Studio reopen the project (`open` on macOS, the file association
+on Windows). Expect a few seconds per edit, a reset undo history and a copy of
+the previous file in the project's `Backup` folder (`<name> (before MCP edit
+HHhMMmSS).flp`, reopen it with `fl_open_project`). The project must have been
+saved once (an untitled project makes FL show a Save As dialog). Files the
+parser cannot rewrite byte for byte are refused. Automation targets: tempo,
+mixer volume/pan/stereo/EQ, effect mix level, any effect or instrument
+parameter, channel volume/pan/pitch.
 
 ### Windows / focus
 
@@ -404,9 +445,10 @@ retarget it before writing notes to a specific channel.
 |------|-------------|
 | `fl_list_patterns` | List patterns and the active one |
 | `fl_select_pattern` | Select/activate a pattern |
-| `fl_new_pattern` | Switch to the next empty pattern (automation-safe) |
+| `fl_new_pattern` | Create a pattern (next empty one), optionally named |
 | `fl_clone_pattern` | Clone a pattern (closes the piano roll - FL behaviour) |
 | `fl_rename_pattern` | Rename a pattern |
+| `fl_set_pattern_color` | Set a pattern's colour |
 
 Requires FL Studio 2024+ (the `patterns` scripting module); older versions
 get a clear error message.
@@ -428,8 +470,8 @@ are.
 
 | Tool | Description |
 |------|-------------|
-| `fl_send_notes` | Add notes by MIDI number or name (C4 = 60), with velocity, pan, colour, slide, porta |
-| `fl_send_chord` | Add a chord by symbol ("Am7", "Cmaj9/E") or list of notes |
+| `fl_send_notes` | Add notes by MIDI number or name (C4 = 60), with velocity, pan, colour, slide, porta; `channel` and `pattern` pick where they go |
+| `fl_send_chord` | Add a chord by symbol ("Am7", "Cmaj9/E") or list of notes; same `channel` / `pattern` |
 | `fl_delete_notes` | Delete specific notes |
 | `fl_clear_piano_roll` | Clear all notes |
 | `fl_get_piano_roll_state` | Read current piano roll notes |
@@ -437,6 +479,17 @@ are.
 | `fl_trigger_script` | Manually trigger the FL Studio script |
 | `fl_get_piano_roll_info` | Get piano roll system info |
 | `fl_clear_request_queue` | Cancel pending queued changes |
+
+### Changed in 0.4.0
+
+`fl_set_song_position(position, mode)` became `fl_set_song_position(bar |
+seconds | ticks)`: the old modes were off by one (mode 2, "seconds", sent
+ticks). `fl_get_song_length` read the wrong units (ticks were bars, seconds
+were ticks) and now returns seconds, milliseconds, ticks, PPQ and bars.
+`fl_set_track_volume` takes `volume` or `volume_db`, and says 0.8 is 0 dB (it
+claimed 1.0). The controller script is at version 3: copy
+`fl_controller/device_FLStudioMCP.py` into FL Studio again (setup.sh) and
+restart FL Studio; `fl_connection_status` reports a stale one.
 
 ### Removed in 0.3.0
 
@@ -492,6 +545,13 @@ and ComposeWithLLM scripts.
 "List the parameters of the plugin on channel 0 and set the filter cutoff to 50%"
 ```
 
+### Arranging a Song
+
+```text
+"Put Intro on track 1 for bars 1-8, the Hook pattern from bar 9 repeated 4 times,
+copy bars 9-25 to bar 41, and fade the master volume out over the last 8 bars"
+```
+
 ## Troubleshooting
 
 ### "Not connected to FL Studio"
@@ -512,7 +572,7 @@ and ComposeWithLLM scripts.
 ### Piano Roll script not triggering
 
 1. Once per FL Studio session: manually run **Tools > Scripting > ComposeWithLLM** from the piano roll (the keystroke only re-runs the last script, so this is needed after every FL Studio start)
-2. On macOS: grant Accessibility permissions when prompted
+2. On macOS: the app that runs the MCP server (Claude Desktop, Terminal, Cursor...) needs **Accessibility** permission (System Settings > Privacy & Security > Accessibility) to send the keystroke; the tools now say so explicitly when macOS refuses it. `fl_write_steps` needs no keystroke at all
 3. On Windows: the MCP server foregrounds the FL Studio window automatically before sending the hotkey — if FL Studio isn't running or is minimized to the system tray, the trigger can't find it and will fall back to a warning telling you to press the hotkey manually
 4. Try pressing Cmd+Opt+Y (macOS) or Ctrl+Alt+Y (Windows/Linux) manually to confirm the hotkey itself is bound to the script in FL Studio
 5. On Linux: `xdotool` must be installed and the session must be X11 - on Wayland, run the script manually from Tools > Scripting

@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING
 from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.annotations import ACTION, DESTRUCTIVE, IDEMPOTENT, READ_ONLY
+from fl_studio_mcp.utils import project_files
 from fl_studio_mcp.utils.errors import run
 from fl_studio_mcp.utils.midi_connection import OUTDATED_CONTROLLER_HINT
+from fl_studio_mcp.utils.music import midi_to_note_name, note_to_midi
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -38,6 +40,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
             "volume": result.get("volume", 0),
             "pan": result.get("pan", 0),
             "pitch": result.get("pitch", 0),
+            **{k: result[k] for k in ("pitch_cents", "pitch_range") if k in result},
             "is_muted": result.get("is_muted", False),
             "is_solo": result.get("is_solo", False),
             "is_selected": result.get("is_selected", False),
@@ -97,7 +100,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
 
         Args:
             channel: Channel index (global)
-            note: MIDI note number (0-127, where 60 = C5/Middle C)
+            note: MIDI note number (0-127, 60 = middle C, "C4" here, "C5" in FL's UI)
             velocity: Note velocity (1-127, 0 = note off)
             midi_channel: MIDI channel (-1 for default)
         """
@@ -304,3 +307,119 @@ def register_channel_tools(mcp: FastMCP) -> None:
         return (
             f"Channel '{channel_name}' pattern set with {active_steps}/{total_steps} steps active"
         )
+
+    @mcp.tool(annotations=DESTRUCTIVE)
+    def fl_write_steps(
+        channel: int,
+        steps: list[dict],
+        pattern: int | None = None,
+        clear: bool = True,
+    ) -> dict:
+        """Write step-sequencer notes with pitch, velocity and pan into any pattern.
+
+        Works without the piano roll and without a keystroke: pick the channel
+        and pattern by number. One note per 16th step and channel, the length
+        is the channel's default (fine for drums, 808s and one-shots; use
+        fl_send_notes for chords, long notes or off-grid timing).
+
+        Args:
+            channel: channel index (global)
+            steps: [{"step": 0, "note": "C3" or "midi": 48, "velocity": 0-127,
+                     "pan": -1..1, "shift": 0-1 (fraction of a step, swing/nudge)}]
+                   step 0 = first 16th of the pattern (16 steps per 4/4 bar).
+                   Pitch defaults to 60 (C4 here; FL's UI calls it C5), which
+                   plays a sample at its original pitch.
+            pattern: pattern number (1-based); default the active pattern.
+                     FL switches to that pattern.
+            clear: first switch off every step of this channel (default True)
+
+        Example: 808 on bar 1: [{"step": 0, "note": "F1", "velocity": 120},
+                                 {"step": 6, "note": "F1"}, {"step": 10, "note": "Ab1"}]
+        """
+        if not isinstance(steps, list):
+            raise ToolError("steps must be a list")
+        conn = get_connection()
+        info = project_files.controller_info(conn)
+        ppq = int(info.get("ppq") or 96)
+        normalized = []
+        seen = set()
+        for i, step in enumerate(steps):
+            normalized.append(_normalize_step(i, step, ppq))
+            if normalized[-1]["step"] in seen:
+                raise ToolError(f"step {i}: step {normalized[-1]['step']} is given twice")
+            seen.add(normalized[-1]["step"])
+        if pattern is not None and (isinstance(pattern, bool) or pattern < 1):
+            raise ToolError(f"pattern numbers start at 1, got {pattern!r}")
+        params = {"channel": channel, "steps": normalized, "clear": clear}
+        if pattern is not None:
+            params["pattern"] = pattern
+        result = run(conn, "channels.setSteps", params)
+        if result.get("mismatched"):
+            raise ToolError(
+                f"FL Studio did not apply {len(result['mismatched'])} step(s): "
+                f"{result['mismatched'][:5]}"
+            )
+        return result
+
+    @mcp.tool(annotations=IDEMPOTENT)
+    def fl_get_steps(channel: int, pattern: int | None = None, steps: int = 0) -> dict:
+        """Read a channel's active step-sequencer steps with pitch, velocity, pan and shift.
+
+        Args:
+            channel: channel index (global)
+            pattern: pattern number (default: the active one; FL switches to it)
+            steps: how many steps to scan (default: the pattern's length)
+        """
+        conn = get_connection()
+        project_files.controller_info(conn)
+        params: dict = {"channel": channel, "steps": steps}
+        if pattern is not None:
+            params["pattern"] = pattern
+        result = run(conn, "channels.getSteps", params)
+        for entry in result.get("active", []):
+            if isinstance(entry.get("pitch"), int):
+                entry["note"] = midi_to_note_name(entry["pitch"])
+        return result
+
+
+def _normalize_step(i: int, step: object, ppq: int) -> dict:
+    """One step for channels.setSteps, with FL's raw parameter values."""
+    if not isinstance(step, dict):
+        raise ToolError(f"step {i}: expected an object, got {step!r}")
+    allowed = {"step", "note", "midi", "velocity", "pan", "shift"}
+    unknown = sorted(set(step) - allowed)
+    if unknown:
+        raise ToolError(f"step {i}: unknown field(s) {', '.join(unknown)}; allowed: "
+                        f"{', '.join(sorted(allowed))}")
+    index = step.get("step")
+    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < 512:
+        raise ToolError(f"step {i}: 'step' must be an integer 0-511, got {index!r}")
+    out: dict = {"step": index}
+    if "note" in step and "midi" in step:
+        raise ToolError(f"step {i}: give note or midi, not both")
+    if "note" in step:
+        try:
+            out["pitch"] = note_to_midi(step["note"])
+        except ValueError as e:
+            raise ToolError(f"step {i}: {e}") from e
+    elif "midi" in step:
+        midi = step["midi"]
+        if isinstance(midi, bool) or not isinstance(midi, int) or not 0 <= midi <= 127:
+            raise ToolError(f"step {i}: midi must be 0-127, got {midi!r}")
+        out["pitch"] = midi
+    if "velocity" in step:
+        velocity = step["velocity"]
+        if isinstance(velocity, bool) or not isinstance(velocity, int) or not 0 <= velocity <= 127:
+            raise ToolError(f"step {i}: velocity must be an integer 0-127, got {velocity!r}")
+        out["velocity"] = velocity
+    if "pan" in step:
+        pan = step["pan"]
+        if isinstance(pan, bool) or not isinstance(pan, (int, float)) or not -1 <= pan <= 1:
+            raise ToolError(f"step {i}: pan must be -1..1, got {pan!r}")
+        out["pan"] = int(round((pan + 1) * 64))
+    if "shift" in step:
+        shift = step["shift"]
+        if isinstance(shift, bool) or not isinstance(shift, (int, float)) or not 0 <= shift < 1:
+            raise ToolError(f"step {i}: shift must be 0 <= shift < 1 (fraction of a step)")
+        out["shift"] = int(round(shift * ppq / 4))
+    return out

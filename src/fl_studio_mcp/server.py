@@ -17,17 +17,21 @@ from fastmcp import FastMCP
 
 from fl_studio_mcp import __version__
 from fl_studio_mcp.tools import (
+    register_arrangement_tools,
     register_channel_tools,
     register_history_tools,
     register_mixer_tools,
     register_pattern_tools,
     register_piano_roll_tools,
+    register_playlist_tools,
     register_plugin_tools,
     register_project_tools,
+    register_sample_tools,
     register_transport_tools,
     register_ui_tools,
 )
 from fl_studio_mcp.tools.annotations import IDEMPOTENT
+from fl_studio_mcp.utils import project_files
 from fl_studio_mcp.utils.connection import get_connection, reset_connection
 
 # Create the MCP server
@@ -39,36 +43,54 @@ FL Studio MCP Server - control a running FL Studio from an AI assistant.
 
 Start with fl_get_project_snapshot: transport, tempo, patterns, channels and
 mixer tracks in one call. If a tool reports no connection, call
-fl_connection_status(reconnect=True).
+fl_connection_status(reconnect=True); it also says when the controller script
+installed in FL Studio is outdated.
+
+Conventions: bars are 1-based like FL's ruler (bar 1 = song start), playlist
+tracks 1-based, patterns 1-based, channels and mixer tracks 0-based (0 =
+Master). Note times inside a pattern are in quarter notes. Pitch names use
+C4 = 60; FL's UI labels MIDI 60 as "C5".
 
 Domains:
-- Transport and tempo: play/stop/record, position, loop mode, speed, tempo
-- Mixer: track volume, pan, mute, solo, arm, name, colour, stereo separation
-- Channels: channel rack properties, mixer routing, step sequencer
-  (fl_set_step_sequence / fl_set_grid_bit for persistent drum steps)
-- Plugins: fl_get_plugin_params describes a plugin and its parameters;
-  parameter values and preset navigation. Loading new plugins is impossible.
-- Piano roll: fl_send_notes, fl_send_chord ("Am7", "Cmaj9/E"),
-  fl_delete_notes, fl_clear_piano_roll, fl_get_piano_roll_state,
-  fl_get_pr_context
-- Patterns: list, select, create empty, clone, rename (FL Studio 2024+)
-- Undo: fl_save_undo_point before a batch of edits, fl_undo, fl_redo
-- Windows: show, hide, focus; fl_open_piano_roll(channel) targets a channel
+- Transport and project: play/stop/record, fl_set_song_position(bar=...),
+  loop mode, tempo (fl_set_tempo), fl_get_song_length, fl_save_project
+- Arrangement (playlist clips): fl_get_arrangement lists every clip and
+  marker; fl_edit_arrangement places / deletes / copies / moves pattern
+  clips and creates automation clips (tempo, volume, pan, pitch, EQ, effect
+  mix, any plugin parameter) in ONE batch. Both save the project; edits
+  make FL reopen it (a few seconds, undo history reset, backup kept - undo
+  with fl_open_project(backup)). Batch all edits into one call.
+- Playlist tracks and markers: fl_get_playlist_tracks,
+  fl_set_playlist_track (name, colour, mute), fl_add_marker
+- Patterns: list, select, fl_new_pattern(name), clone, rename, colour
+- Notes: fl_send_notes / fl_send_chord write into the piano roll of
+  `channel` in `pattern` (they retarget it themselves); they need the
+  ComposeWithLLM keystroke. fl_write_steps writes step-sequencer notes with
+  pitch/velocity/pan into any channel and pattern with no keystroke at all -
+  prefer it for drums, 808s and one-shot patterns.
+- Channels: properties, mixer routing, fl_add_sample_channels (load samples
+  from disk; find them with fl_find_samples, measure them - level, pitch
+  for tuning 808s - with fl_analyze_audio)
+- Mixer: volume (fader or dB), pan, mute, solo, names, colours, sends
+  (fl_set_send for reverb buses), fl_get_mixer_routing, fl_list_effects,
+  fl_get_mixer_levels (peak dBFS per track while playing)
+- Plugins: fl_get_plugin_params, fl_set_plugin_param(name=...) or by
+  index, presets. Loading new plugins or effects is impossible.
+- Undo: fl_save_undo_point before a batch of live edits, fl_undo, fl_redo
+- Windows: show, hide, focus; fl_open_piano_roll(channel)
 
 Piano roll rules:
-- A piano roll window must be open, and ComposeWithLLM must have been run
-  once by hand in this FL Studio session (piano roll > Tools > Scripting).
-- Call fl_open_piano_roll(channel) first to choose which channel the notes
-  go to; the piano roll does not follow channel selection made by scripting.
-- Times and durations are in quarter notes (1.0 = one beat in 4/4).
-- Pitch names use C4 = 60. FL Studio's own UI labels MIDI 60 as "C5", so a
-  note written as "A3" appears as "A4" in FL.
+- ComposeWithLLM must have been run once by hand in this FL Studio session
+  (piano roll > Tools > Scripting); on macOS the app running this server
+  needs Accessibility permission for the keystroke.
 - The note tools verify what FL Studio applied and raise on any failure.
 
 Limits:
 - fl_trigger_note plays a note in real time only; it is not recorded unless
   FL Studio is recording.
 - FL's undo does not track every scripting change (pattern renames).
+- Rendering audio is not scriptable: ask the user to export (File > Export)
+  and analyse the file with fl_analyze_audio.
 """,
 )
 
@@ -127,12 +149,21 @@ def fl_connection_status(reconnect: bool = False) -> dict:
     except RuntimeError:
         pass
     status = conn.get_status()
-    return {
+    out = {
         "connected": status.get("connected", False),
         "port_name": status.get("port_name"),
         "available_ports": status.get("available_ports", []),
         "error": status.get("error"),
     }
+    if out["connected"]:
+        try:
+            info = project_files.controller_info(conn)
+            out["controller_version"] = info.get("controller_version")
+            out["fl_version"] = info.get("fl_version")
+            out["api_version"] = info.get("api_version")
+        except Exception as e:  # noqa: BLE001 - a status report must not fail
+            out["controller_warning"] = str(e)
+    return out
 
 
 # Register all tools
@@ -145,6 +176,9 @@ register_history_tools(mcp)
 register_pattern_tools(mcp)
 register_ui_tools(mcp)
 register_project_tools(mcp)
+register_arrangement_tools(mcp)
+register_playlist_tools(mcp)
+register_sample_tools(mcp)
 
 
 def main():

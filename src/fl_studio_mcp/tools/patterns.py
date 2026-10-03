@@ -59,17 +59,20 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         return f"Selected pattern {result.get('selected')} ({result.get('name')})"
 
     @mcp.tool(annotations=ACTION)
-    def fl_new_pattern() -> str:
-        """Switch to the next empty pattern (automation-safe, no name prompt).
+    def fl_new_pattern(name: str | None = None) -> str:
+        """Create a pattern: switch to the next empty one and optionally name it.
 
         FL patterns are virtual; this finds and activates the next unused
-        pattern, which is the practical equivalent of creating one. Give it a
-        name afterwards with fl_rename_pattern.
+        pattern, which is the practical equivalent of creating one.
+
+        Args:
+            name: name for the new pattern (e.g. "Drums verse")
 
         Note: FL reports the length of an empty pattern as the project's
         current default (often the previous pattern's length), not 0.
         """
-        result = run(get_connection(), "patterns.newEmpty", {})
+        params = {"name": name} if name else {}
+        result = run(get_connection(), "patterns.newEmpty", params)
         return f"Switched to empty pattern {result.get('selected')} ({result.get('name')})"
 
     @mcp.tool(annotations=ACTION)
@@ -93,3 +96,15 @@ def register_pattern_tools(mcp: FastMCP) -> None:
             raise ToolError(error)
         result = run(get_connection(), "patterns.setName", {"index": index, "name": name})
         return f"Pattern {result.get('index')} is now named '{result.get('name')}'"
+
+    @mcp.tool(annotations=IDEMPOTENT)
+    def fl_set_pattern_color(index: int, color: str | list[int]) -> str:
+        """Set a pattern's colour ("#RRGGBB" or [r, g, b]); index is 1-based."""
+        from fl_studio_mcp.tools.playlist import parse_color
+
+        if error := _index_error(index):
+            raise ToolError(error)
+        r, g, b = parse_color(color)
+        params = {"index": index, "r": r, "g": g, "b": b}
+        result = run(get_connection(), "patterns.setColor", params)
+        return f"Pattern {index} colour set to {result.get('color')}"

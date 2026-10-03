@@ -278,15 +278,13 @@ def _run_pr_script(timeout: float = PR_SCRIPT_TIMEOUT) -> dict:
         _focus_piano_roll()
 
     if not trigger.trigger(delay=0.2):
-        return {
-            "triggered": False,
-            "ran": False,
-            "response": None,
-            "error": (
-                "Could not send the trigger keystroke to FL Studio (window not found?). "
-                f"Press {trigger.keystroke} in the piano roll manually."
-            ),
-        }
+        error = getattr(trigger, "last_error", None) or (
+            "Could not send the trigger keystroke to FL Studio (window not found?). "
+            f"Press {trigger.keystroke} in the piano roll manually."
+        )
+        if _load_request_queue():
+            error += PR_SCRIPT_QUEUED_HINT
+        return {"triggered": False, "ran": False, "response": None, "error": error}
 
     deadline = time.time() + timeout
     state_changed_at: float | None = None
@@ -555,11 +553,44 @@ def _checked_response(
     return response, suffix
 
 
+def _target_piano_roll(channel: int | None, pattern: int | None) -> str:
+    """Switch to `pattern` and retarget the piano roll to `channel` (each optional).
+
+    Returns a text fragment for the answer, e.g. " to channel 3 (808) in pattern 2".
+    """
+    from fl_studio_mcp.utils.connection import get_connection
+    from fl_studio_mcp.utils.errors import run
+
+    if channel is None and pattern is None:
+        return ""
+    for name, value, low in (("channel", channel, 0), ("pattern", pattern, 1)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                  or value < low):
+            raise ToolError(f"{name} must be an integer >= {low}, got {value!r}")
+    conn = get_connection()
+    parts = []
+    if pattern is not None:
+        result = run(conn, "patterns.select", {"index": pattern})
+        parts.append(f"pattern {pattern} ({result.get('name')})")
+    params = {} if channel is None else {"index": channel}
+    result = run(conn, "pianoroll.open", params)
+    if channel is not None:
+        name = (result.get("channel") or {}).get("name")
+        parts.insert(0, f"channel {channel} ({name})")
+    return " to " + " in ".join(parts)
+
+
 def register_piano_roll_tools(mcp: FastMCP) -> None:
     """Register piano roll tools with the MCP server."""
 
     @mcp.tool(annotations=DESTRUCTIVE)
-    def fl_send_notes(notes: list[dict], mode: str = "add", auto_trigger: bool = True) -> str:
+    def fl_send_notes(
+        notes: list[dict],
+        mode: str = "add",
+        channel: int | None = None,
+        pattern: int | None = None,
+        auto_trigger: bool = True,
+    ) -> str:
         """Add or replace notes in the open FL Studio piano roll.
 
         Times and durations are in quarter notes. Pitch convention: C4 = 60
@@ -578,6 +609,11 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
                    - slide (bool, default false), porta (bool, default false)
                    Unknown fields are rejected.
             mode: "add" keeps existing notes, "replace" clears the piano roll first
+            channel: channel (global index) whose piano roll receives the notes;
+                     the piano roll is retargeted first. Default: whatever the
+                     open piano roll shows.
+            pattern: pattern number (1-based) to write into; FL switches to it
+                     first. Default: the active pattern.
             auto_trigger: run the piano roll script now and verify the result
                           (default True); False only queues the request
 
@@ -591,6 +627,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         requests = [{"action": "clear"}] if mode == "replace" else []
         requests.append({"action": "add_notes", "notes": normalized})
         summary = _summarize_notes(normalized)
+        target = _target_piano_roll(channel, pattern)
 
         with _PR_LOCK:
             earlier = _queued_note_count()
@@ -600,7 +637,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             outcome = _run_pr_script()
         response, warning = _checked_response(outcome, normalized, earlier)
         return (
-            f"{len(normalized)} note(s) written: {summary}."
+            f"{len(normalized)} note(s) written{target}: {summary}."
             f"{_note_count_text(response)}{warning}"
         )
 
@@ -614,6 +651,8 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         velocity: float = 0.8,
         pan: float = 0.5,
         color: int = 0,
+        channel: int | None = None,
+        pattern: int | None = None,
         auto_trigger: bool = True,
     ) -> str:
         """Add a chord to the open FL Studio piano roll.
@@ -630,6 +669,8 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             duration: length in quarter notes (default 1.0)
             velocity, pan: 0-1 (defaults 0.8 and 0.5)
             color: FL note colour group 0-15 (default 0)
+            channel, pattern: target channel (global index) and pattern number,
+                   as in fl_send_notes (default: the open piano roll)
             auto_trigger: run the piano roll script now and verify the result
 
         Example: fl_send_chord("Am7", octave=3, time=0, duration=4)
@@ -653,6 +694,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         names = " ".join(midi_to_note_name(n["midi"]) for n in normalized)
         label = f"{chord} → {names}" if isinstance(chord, str) else names
         summary = f"{label} at {time:g}, duration {duration:g}"
+        target = _target_piano_roll(channel, pattern)
 
         with _PR_LOCK:
             earlier = _queued_note_count()
@@ -662,7 +704,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
             outcome = _run_pr_script()
         response, warning = _checked_response(outcome, normalized, earlier)
         return (
-            f"{len(normalized)} note(s) written: {summary}."
+            f"{len(normalized)} note(s) written{target}: {summary}."
             f"{_note_count_text(response)}{warning}"
         )
 

@@ -22,7 +22,8 @@ from fl_studio_mcp.utils.midi_connection import MIDIConnection
 
 CONTROLLER_PATH = Path(__file__).resolve().parents[1] / "fl_controller" / "device_FLStudioMCP.py"
 
-FL_MODULES = ("channels", "midi", "mixer", "plugins", "transport", "patterns", "general", "ui")
+FL_MODULES = ("channels", "midi", "mixer", "plugins", "transport", "patterns", "general", "ui",
+              "playlist", "arrangement")
 
 # Integer constants the controller reads from the `midi` module.
 MIDI_CONSTANTS = {
@@ -32,6 +33,19 @@ MIDI_CONSTANTS = {
     "REC_UpdateControl": 16,
     "PIM_None": 0,
     "widPianoRoll": 3,
+    "FPT_Save": 92,
+    "FPT_SaveNew": 93,
+    "REC_Plug_First": 0x20000000,
+    "REC_Plug_MixLevel": 0x20001F01,
+    "REC_Mixer_Vol": 0x20001FC0,
+    "REC_Mixer_Pan": 0x20001FC1,
+    "REC_Mixer_SS": 0x20001FC2,
+    "REC_Mixer_EQ_Gain": 0x20001FD0,
+    "REC_PluginBase": 0x8000,
+    "REC_Chan_Vol": 0,
+    "REC_Chan_Pan": 1,
+    "REC_Chan_Pitch": 4,
+    "REC_Chan_Plugin_First": 0x8000,
 }
 
 
@@ -95,6 +109,7 @@ def make_fl_modules() -> dict[str, MagicMock]:
     channels.getChannelVolume.return_value = 0.78
     channels.getChannelPan.return_value = 0.0
     channels.isChannelSolo.return_value = 0
+    channels.getChannelType.return_value = 0  # sampler
 
     patterns = mods["patterns"]
     patterns.patternNumber.return_value = 1

@@ -176,7 +176,7 @@ def test_channels_get_all_includes_mix_fields(fl):
 
     assert kick == {"index": 0, "name": "Kick", "volume": 0.78, "pan": 0.0,
                     "is_muted": False, "is_solo": False, "is_selected": False,
-                    "target_fx_track": 1}
+                    "target_fx_track": 1, "type": "sampler"}
 
 
 def test_mixer_get_all_tracks_reports_total_count(fl):

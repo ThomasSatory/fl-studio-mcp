@@ -14,6 +14,8 @@ READ_ONLY = {
     "fl_get_plugin_param_value", "fl_get_piano_roll_state", "fl_get_pr_context",
     "fl_get_piano_roll_info", "fl_list_patterns", "fl_get_undo_status",
     "fl_get_focused_window", "fl_get_project_snapshot",
+    "fl_get_mixer_routing", "fl_list_effects", "fl_get_playlist_tracks",
+    "fl_find_samples", "fl_analyze_audio",
 }
 IDEMPOTENT = {
     "fl_connection_status", "fl_set_song_position", "fl_set_loop_mode",
@@ -24,16 +26,20 @@ IDEMPOTENT = {
     "fl_set_grid_bit", "fl_select_channel", "fl_set_plugin_param_value",
     "fl_select_pattern", "fl_rename_pattern", "fl_show_window", "fl_hide_window",
     "fl_focus_window", "fl_open_piano_roll",
+    "fl_save_project", "fl_get_arrangement", "fl_set_send", "fl_set_plugin_param",
+    "fl_set_pattern_color", "fl_set_playlist_track", "fl_get_steps",
 }
 DESTRUCTIVE = {
     "fl_clear_piano_roll", "fl_delete_notes", "fl_send_notes", "fl_set_step_sequence",
     "fl_undo", "fl_redo", "fl_clear_request_queue",
+    "fl_edit_arrangement", "fl_open_project", "fl_add_sample_channels", "fl_write_steps",
 }
 ACTION = {
     "fl_play", "fl_stop", "fl_record", "fl_trigger_note", "fl_send_chord",
     "fl_trigger_script", "fl_next_preset", "fl_prev_preset", "fl_new_pattern",
     "fl_clone_pattern", "fl_save_undo_point", "fl_mute_track", "fl_solo_track",
     "fl_arm_track", "fl_mute_channel", "fl_solo_channel",
+    "fl_add_marker", "fl_preview_sample", "fl_get_mixer_levels",
 }
 REMOVED = {
     "fl_get_channel_count", "fl_get_selected_channel", "fl_select_one_channel",
@@ -54,7 +60,7 @@ def hints(tool):
 
 def test_exact_tool_set():
     names = set(registered())
-    assert len(names) == 64
+    assert len(names) == 83
     assert names == READ_ONLY | IDEMPOTENT | DESTRUCTIVE | ACTION
     assert not names & REMOVED
 
@@ -81,7 +87,8 @@ def test_instructions_match_the_tool_set():
     assert "Cannot create new patterns" not in text
     assert "C4 = 60" in text and "C5" in text
     for name in ("fl_get_project_snapshot", "fl_open_piano_roll", "fl_send_chord",
-                 "fl_save_undo_point", "fl_connection_status"):
+                 "fl_save_undo_point", "fl_connection_status", "fl_edit_arrangement",
+                 "fl_get_arrangement", "fl_write_steps", "fl_add_sample_channels"):
         assert name in text, name
     for name in REMOVED:
         assert not re.search(rf"\b{name}\b", text), name

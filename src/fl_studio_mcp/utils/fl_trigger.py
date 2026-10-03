@@ -24,6 +24,20 @@ class FLProbeError(RuntimeError):
     """Whether FL Studio is running could not be determined (not: it is not running)."""
 
 
+# macOS refuses synthetic keystrokes from an app without Accessibility access;
+# osascript then fails with one of these.
+ACCESSIBILITY_MARKERS = ("1002", "-25211", "not allowed to send keystrokes", "assistive",
+                         "not allowed assistive", "-1719", "accessibility")
+
+ACCESSIBILITY_HINT = (
+    "macOS blocked the keystroke that runs the piano roll script: the app running this MCP "
+    "server has no Accessibility permission. Open System Settings > Privacy & Security > "
+    "Accessibility and enable the app that launches the server (Claude, Terminal, iTerm, "
+    "Cursor...), then restart that app. Meanwhile press Cmd+Opt+Y in the piano roll, or "
+    "use fl_write_steps, which needs no keystroke."
+)
+
+
 class FLStudioTrigger:
     """Handles triggering FL Studio's Piano Roll script via keystrokes.
 
@@ -35,6 +49,8 @@ class FLStudioTrigger:
     def __init__(self) -> None:
         self._system = platform.system()
         self._trigger_func: Callable[[], bool] | None = None
+        # Why the last trigger() failed, when known (e.g. ACCESSIBILITY_HINT).
+        self.last_error: str | None = None
         self._setup_trigger()
 
     def _setup_trigger(self) -> None:
@@ -109,17 +125,25 @@ class FLStudioTrigger:
                 keystroke "y" using {{command down, option down}}
             end tell
             '''
-            subprocess.run(
+            result = subprocess.run(
                 ["osascript", "-e", script],
                 capture_output=True,
+                text=True,
                 timeout=10,
             )
-            return True
         except subprocess.TimeoutExpired:
             return False
         except Exception:
             # Fallback to pynput
             return self._trigger_macos_pynput()
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip()
+            if any(m in detail.lower() for m in ACCESSIBILITY_MARKERS):
+                self.last_error = ACCESSIBILITY_HINT
+            else:
+                self.last_error = f"osascript failed: {detail or result.returncode}"
+            return False
+        return True
 
     def _trigger_macos_pynput(self) -> bool:
         """Trigger FL Studio on macOS using pynput."""
@@ -356,6 +380,7 @@ class FLStudioTrigger:
         if self._trigger_func is None:
             return False
 
+        self.last_error = None
         success = self._trigger_func()
         if success and delay > 0:
             time.sleep(delay)

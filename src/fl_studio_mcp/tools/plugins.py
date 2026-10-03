@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.annotations import ACTION, IDEMPOTENT, READ_ONLY
+from fl_studio_mcp.utils import project_files
 from fl_studio_mcp.utils.errors import run
 from fl_studio_mcp.utils.midi_connection import OUTDATED_CONTROLLER_HINT
 
@@ -156,3 +157,32 @@ def register_plugin_tools(mcp: FastMCP) -> None:
         plugin_name = result.get("plugin_name", "Plugin")
         return f"Switched '{plugin_name}' to previous preset"
 
+
+    @mcp.tool(annotations=IDEMPOTENT)
+    def fl_set_plugin_param(
+        name: str,
+        value: float,
+        index: int,
+        slot_index: int = -1,
+    ) -> dict:
+        """Set a plugin parameter by its name (no need to look up its index).
+
+        The name is matched case-insensitively, exactly first, then as a
+        substring; an ambiguous substring fails and lists the candidates.
+
+        Args:
+            name: parameter name as FL shows it, e.g. "Mix", "Decay", "Cutoff"
+            value: normalized value 0.0-1.0 (value_string in the answer shows
+                   what it means, e.g. "35%" or "2.1 s")
+            index: channel index (global) for an instrument, or mixer track
+                   for an effect
+            slot_index: mixer effect slot (see fl_list_effects); -1 = channel plugin
+        """
+        if not 0.0 <= value <= 1.0:
+            raise ToolError("value must be normalized between 0.0 and 1.0")
+        conn = get_connection()
+        project_files.controller_info(conn)
+        return run(conn, "plugins.setParamByName", {
+            "name": name, "value": value, "index": index, "slot_index": slot_index,
+            "use_global": True,
+        })

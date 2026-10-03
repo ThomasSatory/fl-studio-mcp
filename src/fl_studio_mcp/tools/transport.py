@@ -8,6 +8,7 @@ from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.annotations import ACTION, IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils.errors import run
+from fl_studio_mcp.utils.midi_connection import OUTDATED_CONTROLLER_HINT
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -71,39 +72,54 @@ def register_transport_tools(mcp: FastMCP) -> None:
         }
 
     @mcp.tool(annotations=IDEMPOTENT)
-    def fl_set_song_position(position: float, mode: int = 2) -> str:
-        """Set the playback position in FL Studio.
+    def fl_set_song_position(
+        bar: float | None = None,
+        seconds: float | None = None,
+        ticks: int | None = None,
+        beats_per_bar: int = 4,
+    ) -> dict:
+        """Move the playhead, by 1-based bar, by seconds or by absolute ticks.
+
+        In pattern mode the position is inside the pattern, in song mode in the song.
 
         Args:
-            position: The position value. Interpretation depends on mode.
-            mode: Position format:
-                  0 = Percentage (0.0 to 1.0)
-                  1 = Time in milliseconds
-                  2 = Time in seconds (default)
-                  3 = Position in ticks
-                  4 = Position as bars:steps:ticks (encoded)
+            bar: 1-based bar (1 = start, 9.5 = half-way through bar 9)
+            seconds: time from the start
+            ticks: absolute ticks (PPQ ticks per quarter note)
+            beats_per_bar: time signature numerator used for `bar` (default 4)
         """
-        result = run(get_connection(), "transport.setPosition", {
-            "position": position,
-            "mode": mode,
-        })
-
-        new_pos = result.get("position", "")
-        return f"Position set to {new_pos}"
+        given = [v for v in (bar, seconds, ticks) if v is not None]
+        if len(given) != 1:
+            raise ToolError("give exactly one of bar, seconds or ticks")
+        conn = get_connection()
+        if bar is not None:
+            if bar < 1:
+                raise ToolError("bar must be >= 1")
+            ppq = run(conn, "transport.getLength").get("ppq") or 96
+            params = {"ticks": int(round((bar - 1) * beats_per_bar * ppq))}
+        elif seconds is not None:
+            if seconds < 0:
+                raise ToolError("seconds must be >= 0")
+            params = {"seconds": float(seconds)}
+        else:
+            if ticks < 0:
+                raise ToolError("ticks must be >= 0")
+            params = {"ticks": int(ticks)}
+        result = run(conn, "transport.setPosition", params)
+        return {"position": result.get("position"), "ticks": result.get("ticks")}
 
     @mcp.tool(annotations=READ_ONLY)
     def fl_get_song_length() -> dict:
-        """Get the total length of the current song/pattern.
+        """Length of the song (playlist arrangement, not the current pattern).
 
-        Returns the length in multiple formats for convenience.
+        Returns seconds, milliseconds, absolute ticks, PPQ and bars
+        (whole bars + steps + ticks, like FL's B:S:T display).
         """
         result = run(get_connection(), "transport.getLength")
-
-        return {
-            "ticks": result.get("ticks", 0),
-            "seconds": result.get("seconds", 0),
-            "milliseconds": result.get("milliseconds", 0),
-        }
+        if "ppq" not in result:
+            raise ToolError(OUTDATED_CONTROLLER_HINT)
+        keys = ("seconds", "milliseconds", "ticks", "ppq", "bars", "steps", "bar_ticks")
+        return {key: result.get(key) for key in keys}
 
     @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_loop_mode(mode: str) -> str:
