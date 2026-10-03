@@ -158,6 +158,7 @@ class FakeFL:
         self.routing: dict[int, dict[int, float]] | None = {
             t: {d: 0.8 for d in dests} for t, dests in ROUTES.items()}
         self.extra_channels: list[dict] = []
+        self.master_volume: float | None = 0.8
 
     def send_command(self, action, params=None, timeout=2.0):
         self.calls.append(action)
@@ -170,6 +171,10 @@ class FakeFL:
                 for d, level in self.routing.get(track, {}).items()]}
         if action == "system.info":
             return {"success": True, "controller_version": 4}
+        if action == "mixer.getTrackInfo":
+            if self.master_volume is None:
+                return {"success": False, "error": "Timeout"}
+            return {"success": True, "index": params["track"], "volume": self.master_volume}
         if action == "transport.getTempo":
             return {"success": True, "tempo": self.tempo}
         if action == "channels.getAll":
@@ -244,7 +249,8 @@ def tool(tmp_path, monkeypatch, request):
 def test_render_mix_without_stems(tool):
     fl_render_mix, fake, renders, flp_path = tool
     result = fl_render_mix()
-    assert fake.calls == ["current(save=True)"]
+    assert fake.calls == ["current(save=True)", "mixer.getTrackInfo"]
+    assert not any("Master fader" in w for w in result["analysis"]["warnings"])
     assert len(renders) == 1 and renders[0]["name"] == "My Song"
     assert renders[0]["data"] == flp_path.read_bytes()
     assert renders[0]["timeout"] == render_util.render_timeout(16.0)
@@ -411,3 +417,20 @@ def test_any_stem_exception_is_isolated(tool, monkeypatch):
     assert [s["track"] for s in result["stems"]] == [2]
     assert "stem 1 (Kick) not rendered: RuntimeError: bad wav" in result["stem_warnings"]
     assert [p[:2] for p in fake.progress] == [(1, 3), (2, 3), (3, 3)]
+
+
+@pytest.mark.parametrize("volume", [0.0, 0.05])
+def test_render_warns_when_master_fader_is_down(tool, volume):
+    fl_render_mix, fake, _, _ = tool
+    fake.master_volume = volume
+    warnings = fl_render_mix(sections=False)["analysis"]["warnings"]
+    assert warnings[0].startswith(f"Master fader is at {volume:.2f}: the render is (nearly) "
+                                  "silent")
+    assert "leaves it there after it ends" in warnings[0]
+
+
+def test_render_without_master_volume_does_not_fail(tool):
+    fl_render_mix, fake, _, _ = tool
+    fake.master_volume = None
+    warnings = fl_render_mix(sections=False)["analysis"]["warnings"]
+    assert not any("Master fader" in w for w in warnings)

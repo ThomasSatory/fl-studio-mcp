@@ -3,7 +3,8 @@
 `OsxFL -R -Ewav <file.flp>` (FL64.exe on Windows) writes `<file>.wav` next to
 the project and exits. Only one render can run at a time, so renders are
 serialized with a lock shared between threads and processes. A failed render
-may exit 0 without writing anything, so the output file is what counts.
+may exit 0 without writing anything, so the output file is what counts. The
+renderer also crashes now and then (killed by a signal); that is retried once.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -25,6 +27,9 @@ MIN_WAV_BYTES = 44  # a WAV header alone
 MIN_TIMEOUT, MAX_TIMEOUT = 90.0, 1200.0
 BINARY_ENV = "FL_STUDIO_MCP_FL_BINARY"
 RENDER_DIR_ENV = "FL_STUDIO_MCP_RENDER_DIR"
+# FL's command-line renderer sometimes segfaults (exit -11); a killed render
+# that wrote nothing is retried this many times.
+SIGNAL_RETRIES = 1
 
 _thread_lock = threading.Lock()
 
@@ -178,6 +183,44 @@ def _purge(directory: Path, keep: Path | None = None) -> None:
             pass
 
 
+def _signal_name(number: int) -> str:
+    try:
+        return f", {signal.Signals(number).name}"
+    except ValueError:
+        return ""
+
+
+def _wrote_wav(wav: Path) -> bool:
+    return wav.exists() and wav.stat().st_size >= MIN_WAV_BYTES
+
+
+def _run_renderer(binary: Path, flp: Path, timeout: float) -> int | None:
+    """Run one render of `flp`; returns the exit code (negative: killed by a signal)."""
+    try:
+        proc = subprocess.Popen(
+            render_command(binary, flp),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as e:
+        raise ToolError(f"Could not launch FL Studio ({binary}): {e}") from e
+    try:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _stop(proc)
+            raise ToolError(
+                f"FL Studio did not finish rendering within {timeout:g} s and "
+                "was stopped. It may be waiting on a dialog (missing plugin, "
+                "missing sample, demo limitation): the render runs on a copy "
+                "in a temp folder, so samples FL finds relative to the "
+                "project folder may be missing; open the project in FL to check."
+            ) from None
+    finally:
+        _stop(proc)
+    return proc.returncode
+
+
 def render_wav(
     flp_data: bytes, name: str, timeout: float, binary: Path | None = None
 ) -> Path:
@@ -190,35 +233,25 @@ def render_wav(
         try:
             flp = work / f"{name}.flp"
             flp.write_bytes(flp_data)
-            try:
-                proc = subprocess.Popen(
-                    render_command(binary, flp),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except OSError as e:
-                raise ToolError(f"Could not launch FL Studio ({binary}): {e}") from e
-            try:
-                try:
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    _stop(proc)
-                    raise ToolError(
-                        f"FL Studio did not finish rendering within {timeout:g} s and "
-                        "was stopped. It may be waiting on a dialog (missing plugin, "
-                        "missing sample, demo limitation): the render runs on a copy "
-                        "in a temp folder, so samples FL finds relative to the "
-                        "project folder may be missing; open the project in FL to check."
-                    ) from None
-            finally:
-                _stop(proc)
             wav = work / f"{name}.wav"
-            if not wav.exists() or wav.stat().st_size < MIN_WAV_BYTES:
-                raise ToolError(
-                    f"FL Studio wrote no audio file (exit code {proc.returncode}). "
-                    "Another render may have been running, or the project could "
-                    "not be rendered; open it in FL to check."
-                )
+            for attempt in range(SIGNAL_RETRIES + 1):
+                returncode = _run_renderer(binary, flp, timeout)
+                if _wrote_wav(wav):
+                    break
+                if returncode is None or returncode >= 0:
+                    raise ToolError(
+                        f"FL Studio wrote no audio file (exit code {returncode}). "
+                        "Another render may have been running, or the project could "
+                        "not be rendered; open it in FL to check."
+                    )
+                if attempt == SIGNAL_RETRIES:
+                    raise ToolError(
+                        f"FL Studio's command-line renderer crashed (signal {-returncode}"
+                        f"{_signal_name(-returncode)}), {SIGNAL_RETRIES + 1} times in a "
+                        "row. This happens intermittently and retrying usually works. "
+                        "macOS may show a crash dialog for the renderer (a separate FL "
+                        "Studio process); it can be dismissed."
+                    )
             stamp = time.strftime("%Y-%m-%d %Hh%Mm%S")
             dest = out_dir / f"{name} {stamp}.wav"
             n = 1

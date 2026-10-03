@@ -499,7 +499,11 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
            volumes use the fader scale of fl_set_track_volume (0.8 = 0 dB),
            pan and pitch 0 = left/-max, 0.5 = centre, 1 = right/+max,
            plugin parameters the value of fl_set_plugin_param. tension -1..1
-           curves the segment that ends at that point. Targets:
+           curves the segment that ends at that point. FL keeps an
+           automation clip's last value after the clip ends: a fade of Master
+           to 0 leaves Master at 0, so the song is silent from its start on
+           the next playback or render; end a fade with a point back at the
+           normal level, or reset the fader afterwards. Targets:
              {"type": "tempo"}
              {"type": "mixer_volume" | "mixer_pan" | "mixer_stereo", "track": 3}
              {"type": "mixer_eq", "track": 3, "band": 0-2, "eq": "gain"|"freq"|"q"}

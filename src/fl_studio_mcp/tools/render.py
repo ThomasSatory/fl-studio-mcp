@@ -215,6 +215,20 @@ async def _progress(ctx: Context | None, done: int, total: int, message: str) ->
         pass
 
 
+# Master fader position (0-1.25, 0.8 = 0 dB) at or below which a render is
+# (nearly) silent.
+MASTER_SILENT = 0.05
+
+
+def _master_volume(conn: Any) -> float | None:
+    """The live Master fader position, or None when FL does not report it."""
+    try:
+        answer = run(conn, "mixer.getTrackInfo", {"track": 0})
+        return float(answer["volume"])
+    except (ToolError, KeyError, TypeError, ValueError):
+        return None
+
+
 def register_render_tools(mcp: FastMCP) -> None:
     """Register fl_render_mix with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
@@ -335,6 +349,12 @@ def register_render_tools(mcp: FastMCP) -> None:
                 notes.append("Section times come from the project tempo; tempo automation "
                              "shifts them.")
         analysis = await _in_thread(mix_analysis.analyze_mix, wav, bounds)
+        master = await _in_thread(_master_volume, conn)
+        if master is not None and master <= MASTER_SILENT:
+            analysis.setdefault("warnings", []).insert(0, (
+                f"Master fader is at {master:.2f}: the render is (nearly) silent; an "
+                "automation clip that fades Master to 0 leaves it there after it ends. "
+                "Set it back with fl_set_track_volume(track=0, volume=0.8)."))
         await _progress(ctx, 1, total, "Mix rendered and analysed"
                         + (f"; rendering {len(targets)} stem(s)" if targets else ""))
 

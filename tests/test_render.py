@@ -11,10 +11,20 @@ from fastmcp.exceptions import ToolError
 from fl_studio_mcp.utils import render
 
 FAKE = """#!{py}
-import os, sys, time
+import os, signal, sys, time
 from pathlib import Path
 mode = os.environ.get("FAKE_FL_MODE", "ok")
 flp = Path(sys.argv[-1])
+counter = os.environ.get("FAKE_FL_COUNTER")
+if counter:
+    calls = int(Path(counter).read_text() or 0) + 1 if Path(counter).exists() else 1
+    Path(counter).write_text(str(calls))
+if mode == "crash_once":
+    if calls == 1:
+        os.kill(os.getpid(), signal.SIGSEGV)
+    mode = "ok"
+if mode == "crash":
+    os.kill(os.getpid(), signal.SIGSEGV)
 if mode == "sleep":
     time.sleep(60)
 elif mode == "ok":
@@ -136,3 +146,37 @@ def test_lock_released_after_failure(env, monkeypatch):
         render.render_wav(b"x", "s", 30, binary=fake)
     monkeypatch.setenv("FAKE_FL_MODE", "ok")
     assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+
+
+def test_renderer_crash_is_retried_once(env, monkeypatch, tmp_path):
+    fake, out = env
+    counter = tmp_path / "calls"
+    monkeypatch.setenv("FAKE_FL_MODE", "crash_once")
+    monkeypatch.setenv("FAKE_FL_COUNTER", str(counter))
+    path = render.render_wav(b"x", "s", 30, binary=fake)
+    assert path.exists() and path.parent == out
+    assert counter.read_text() == "2"
+
+
+def test_renderer_crashing_twice_says_it_crashed(env, monkeypatch, tmp_path):
+    fake, _ = env
+    counter = tmp_path / "calls"
+    monkeypatch.setenv("FAKE_FL_MODE", "crash")
+    monkeypatch.setenv("FAKE_FL_COUNTER", str(counter))
+    with pytest.raises(ToolError) as excinfo:
+        render.render_wav(b"x", "s", 30, binary=fake)
+    message = str(excinfo.value)
+    assert "renderer crashed (signal 11, SIGSEGV)" in message
+    assert "crash dialog" in message and "retrying usually works" in message
+    assert "Another render" not in message
+    assert counter.read_text() == "2"
+
+
+def test_normal_failure_is_not_retried(env, monkeypatch, tmp_path):
+    fake, _ = env
+    counter = tmp_path / "calls"
+    monkeypatch.setenv("FAKE_FL_MODE", "none")
+    monkeypatch.setenv("FAKE_FL_COUNTER", str(counter))
+    with pytest.raises(ToolError, match="exit code 0"):
+        render.render_wav(b"x", "s", 30, binary=fake)
+    assert counter.read_text() == "1"
