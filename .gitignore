@@ -6,3 +6,4 @@ src/fl_studio_mcp/__pycache__/
 src/fl_studio_mcp/tools/__pycache__
 src/fl_studio_mcp/utils/__pycache__
 __pycache__/
+.superpowers/
