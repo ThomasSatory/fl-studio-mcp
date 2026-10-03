@@ -426,15 +426,19 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
     def fl_save_project(new_version: bool = False, project_path: str | None = None) -> dict:
         """Save the open project (Ctrl+S) and return the path of the saved .flp.
 
+        When FL has no unsaved change and the file is the one it last saved,
+        nothing is saved ("saved": false): the file is already current.
+
         Args:
             new_version: save as a new numbered version ("Save new version")
             project_path: the .flp you expect FL to save to; found automatically if omitted
         """
         conn = get_connection()
-        project_files.controller_info(conn)
-        started = project_files.save_project(conn, new_version=new_version)
-        path = project_files.locate_saved_project(started, None if new_version else project_path)
-        return {"saved": True, "project": str(path)}
+        path, saved = project_files.save_and_locate(conn, project_path, new_version)
+        out = {"saved": saved, "project": str(path)}
+        if not saved:
+            out["note"] = "No unsaved changes: the file on disk is already current."
+        return out
 
     @mcp.tool(annotations=IDEMPOTENT)
     def fl_get_arrangement(

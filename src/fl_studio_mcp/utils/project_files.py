@@ -15,6 +15,7 @@ import platform
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastmcp.exceptions import ToolError
@@ -55,9 +56,85 @@ SEARCH_BUDGET = 4.0  # seconds spent walking folders for the saved project
 SAVE_TIMEOUT = 10.0
 RELOAD_TIMEOUT = 120.0
 MIN_RELOAD_WAIT = 4.0
+# A save is finished when the file stopped changing for this long (and FL's
+# temporary "<name>.flp~" is gone): FL writes the temp file, then renames it.
+SAVE_STABLE_DELAY = 0.2
+# FL crashed (SIGILL) during a save that came ~18 s after a quick save ->
+# MCP write -> reload sequence; saving right after a reload is avoided.
+SETTLE_AFTER_RELOAD = 3.0
+FL_PROCESS_NAME = "OsxFL"  # FL Studio's main process on macOS
 
 # The last project path found, reused while it keeps being the file FL saves to.
 _last_project: Path | None = None
+# (st_mtime_ns, st_size) of project files as they were right after FL saved
+# them or the MCP wrote them: an unchanged project need not be saved again.
+_known_files: dict[str, tuple[int, int]] = {}
+# True once a command that may change the project went to FL since the last
+# save or write (FL's changed flag may not count script edits).
+_mcp_changes = False
+# time.monotonic() when the last MCP-triggered reload finished.
+_reload_finished_at: float | None = None
+
+# Controller actions that leave the project as it is (playhead, selection and
+# windows are not worth a save). Any other action may change the project.
+_NEUTRAL_ACTIONS = {
+    "system.info", "transport.save", "transport.setPosition", "transport.start",
+    "transport.stop", "automation.resolve", "automation.describe", "project.snapshot",
+    "patterns.select", "channels.select", "channels.selectOne", "channels.triggerNote",
+    "pianoroll.open",
+}
+
+
+def note_command(action: str) -> None:
+    """Called for every command sent to FL: remember when the project may have changed."""
+    global _mcp_changes
+    method = action.rsplit(".", 1)[-1]
+    if action in _NEUTRAL_ACTIONS or action.startswith("ui.") or method.startswith(("get", "is")):
+        return
+    _mcp_changes = True
+
+
+def _stat(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def remember_file(path: Path) -> None:
+    """Record `path` as matching the open project (just saved by FL or written by the MCP)."""
+    global _mcp_changes
+    state = _stat(path)
+    if state is not None:
+        _known_files[str(path)] = state
+        _mcp_changes = False
+
+
+def reload_finished() -> None:
+    """Note that an MCP-triggered reload just finished (see SETTLE_AFTER_RELOAD)."""
+    global _reload_finished_at
+    _reload_finished_at = time.monotonic()
+
+
+def _settle_after_reload() -> None:
+    if _reload_finished_at is None:
+        return
+    remaining = SETTLE_AFTER_RELOAD - (time.monotonic() - _reload_finished_at)
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def fl_process_running() -> bool | None:
+    """Whether FL Studio's process runs (macOS, via pgrep); None when unknown."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        result = subprocess.run(["pgrep", "-x", FL_PROCESS_NAME], capture_output=True,
+                                timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.returncode == 0
 
 
 def controller_info(conn, timeout: float = 2.0,
@@ -105,9 +182,26 @@ def _is_backup(path: Path) -> bool:
     )
 
 
+def written_after(mtime_ns: int, since: float) -> bool:
+    """True when a file with this mtime was written after `since` (epoch seconds).
+
+    APFS (macOS) and NTFS store sub-second mtimes, so a file saved after the
+    request is strictly newer than it; no slack is allowed, or a file written a
+    moment before the request (FL's previous save, the MCP's last write) would
+    pass for the new save. A whole-second mtime comes from a coarse file system
+    (HFS+, FAT, some network shares): it is accepted from the start of the
+    request's second, the best that can be done there.
+    """
+    since_ns = int(since * 1_000_000_000)
+    if mtime_ns > since_ns:
+        return True
+    second = 1_000_000_000
+    return mtime_ns % second == 0 and mtime_ns >= since_ns // second * second
+
+
 def find_recent_projects(since: float, roots: list[Path] | None = None) -> list[Path]:
-    """.flp files modified at or after `since` (epoch seconds), newest first."""
-    found: list[tuple[float, Path]] = []
+    """.flp files written after `since` (epoch seconds, see written_after), newest first."""
+    found: list[tuple[int, Path]] = []
     deadline = time.time() + SEARCH_BUDGET
     for root in roots or search_roots():
         root_depth = len(root.parts)
@@ -126,11 +220,11 @@ def find_recent_projects(since: float, roots: list[Path] | None = None) -> list[
                 if _is_backup(path):
                     continue
                 try:
-                    mtime = path.stat().st_mtime
+                    mtime_ns = path.stat().st_mtime_ns
                 except OSError:
                     continue
-                if mtime >= since:
-                    found.append((mtime, path))
+                if written_after(mtime_ns, since):
+                    found.append((mtime_ns, path))
     found.sort(reverse=True)
     unique, seen = [], set()
     for _, path in found:
@@ -140,51 +234,154 @@ def find_recent_projects(since: float, roots: list[Path] | None = None) -> list[
     return unique
 
 
-def _mtime(path: Path) -> float:
+def temp_file(path: Path) -> Path:
+    """FL's temporary file while it saves `path` ("<name>.flp~", renamed when done)."""
+    return path.with_name(path.name + "~")
+
+
+@dataclass
+class SaveRequest:
+    """A save asked of FL: when, and the state of the files it may write."""
+
+    requested: float  # time.time() just before the request
+    before: dict[str, tuple[int, int] | None] = field(default_factory=dict)
+    temp_before: dict[str, tuple[int, int] | None] = field(default_factory=dict)
+    path_hint: Path | None = None  # the file FL is expected to write, for messages
+
+
+def fl_stopped_error(path: Path | None) -> ToolError:
+    """The error for an FL Studio that died or stopped answering during a save."""
+    if path is None:
+        return ToolError(
+            "FL Studio stopped (it probably crashed) while saving the project. Relaunch FL "
+            "Studio and reopen the project; MCP backups are in the Backup folder next to it."
+        )
     try:
-        return path.stat().st_mtime
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime))
     except OSError:
-        return 0.0
+        when = "unknown"
+    return ToolError(
+        f"FL Studio stopped (it probably crashed) while saving {path}. The last saved file "
+        f"is {path} (modified {when}); MCP backups are in {path.parent / 'Backup'}. "
+        "Relaunch FL Studio and reopen the project."
+    )
 
 
-def save_project(conn, new_version: bool = False) -> float:
-    """Ask FL Studio to save; returns the time just before the request.
+def _fl_answers(conn) -> bool:
+    try:
+        result = conn.send_command("system.info", None, 2.0)
+    except RuntimeError:
+        return False
+    return bool(result.get("success"))
+
+
+def _candidates(project_path: str | None) -> list[Path]:
+    if project_path:
+        return [Path(project_path).expanduser()]
+    return [_last_project] if _last_project is not None else []
+
+
+def save_project(conn, new_version: bool = False,
+                 project_path: str | None = None) -> SaveRequest:
+    """Ask FL Studio to save; returns what locate_saved_project needs to find the file.
 
     Needs controller version 4 (see SAVE_CONTROLLER_VERSION). The controller
     refuses to save while FL says it is not safe (a modal window, FL busy);
-    that is retried a few times before giving up.
+    that is retried a few times before giving up. A save right after an
+    MCP-triggered reload waits until SETTLE_AFTER_RELOAD has passed.
     """
     controller_info(conn, min_version=SAVE_CONTROLLER_VERSION)
-    started = time.time() - 1.0  # file system timestamps can be coarse
+    _settle_after_reload()
+    candidates = [] if new_version else _candidates(project_path)
+    request = SaveRequest(
+        requested=time.time(),
+        before={str(c): _stat(c) for c in candidates},
+        temp_before={str(c): _stat(temp_file(c)) for c in candidates},
+        path_hint=candidates[0] if candidates else _last_project,
+    )
     for attempt in range(SAVE_RETRIES):
         try:
             run(conn, "transport.save", {"new_version": new_version}, timeout=SAVE_TIMEOUT)
-            return started
+            return request
         except ToolError as e:
-            if SAVE_BUSY_MARKER not in str(e) or attempt == SAVE_RETRIES - 1:
-                raise
-            time.sleep(SAVE_RETRY_DELAY)
-    return started
+            if SAVE_BUSY_MARKER in str(e) and attempt < SAVE_RETRIES - 1:
+                time.sleep(SAVE_RETRY_DELAY)
+                continue
+            if SAVE_BUSY_MARKER not in str(e) and fl_process_running() is False:
+                raise fl_stopped_error(request.path_hint) from e
+            raise
+    return request
 
 
-def locate_saved_project(started: float, project_path: str | None = None) -> Path:
-    """The .flp FL Studio wrote since `started`, waiting a few seconds for it."""
+def _saved_since(path: Path, request: SaveRequest) -> bool:
+    """The file changed after the save request (not merely 'recent')."""
+    state = _stat(path)
+    if state is None:
+        return False
+    key = str(path)
+    if key in request.before:
+        return state != request.before[key]
+    return written_after(state[0], request.requested)
+
+
+def _save_finished(path: Path, request: SaveRequest) -> bool:
+    """FL's temp file is gone (or untouched since the request) and the file is stable."""
+    def temp_busy() -> bool:
+        state = _stat(temp_file(path))
+        if state is None:
+            return False
+        key = str(path)
+        if key in request.temp_before:
+            return state != request.temp_before[key]  # a stale ~ left by a crash is ignored
+        return written_after(state[0], request.requested)
+
+    if temp_busy():
+        return False
+    first = _stat(path)
+    time.sleep(SAVE_STABLE_DELAY)
+    second = _stat(path)
+    return first is not None and first == second and second[1] > 0 and not temp_busy()
+
+
+def locate_saved_project(request: SaveRequest, project_path: str | None = None,
+                         conn=None, search_only: bool = False) -> Path:
+    """The .flp FL Studio wrote for `request`, waiting until the save has finished.
+
+    A file only counts once it changed after the request (another mtime or
+    size than just before it) and FL's "<name>.flp~" is gone. With no known
+    path, the search folders are walked for an .flp written after the request
+    (search_only: only that, e.g. for "save new version"). If FL Studio's
+    process is gone, or FL stops answering, the save is reported as a crash.
+    """
     global _last_project
     explicit = Path(project_path).expanduser() if project_path else None
+    if explicit is not None:
+        known = [explicit]
+    elif search_only or _last_project is None:
+        known = []
+    else:
+        known = [_last_project]
     deadline = time.time() + SAVE_TIMEOUT
     while True:
-        for candidate in (explicit, _last_project):
-            if candidate is not None and _mtime(candidate) >= started:
+        for candidate in known:
+            if _saved_since(candidate, request) and _save_finished(candidate, request):
                 _last_project = candidate
+                remember_file(candidate)
                 return candidate
         if explicit is None:
-            recent = find_recent_projects(started)
-            if recent:
+            recent = [p for p in find_recent_projects(request.requested)
+                      if not known or p != known[0]]
+            if recent and _save_finished(recent[0], request):
                 _last_project = recent[0]
+                remember_file(recent[0])
                 return recent[0]
+        if fl_process_running() is False:
+            raise fl_stopped_error(explicit or request.path_hint)
         if time.time() > deadline:
             break
         time.sleep(0.3)
+    if conn is not None and not _fl_answers(conn):
+        raise fl_stopped_error(explicit or request.path_hint)
     if explicit is not None:
         raise ToolError(
             f"FL Studio did not save to {explicit}. Is that the open project? A save "
@@ -197,20 +394,59 @@ def locate_saved_project(started: float, project_path: str | None = None) -> Pat
     )
 
 
+def unchanged_project(info: dict, project_path: str | None) -> Path | None:
+    """The project file when it is known to match FL already, so no save is needed.
+
+    True when FL reports no unsaved change, no MCP command changed the project
+    since, and the file (project_path, or the one located last) is exactly as
+    FL last saved it or the MCP last wrote it. Every avoided save is one less
+    chance for FL to crash while saving.
+    """
+    if info.get("changed") or _mcp_changes:
+        return None
+    candidates = _candidates(project_path)
+    if not candidates:
+        return None
+    candidate = candidates[0]
+    known = _known_files.get(str(candidate))
+    if known is None or _stat(candidate) != known:
+        return None
+    title = info.get("title")
+    if isinstance(title, str) and title.strip() and candidate.stem.lower() not in title.lower():
+        return None  # FL's window names another project
+    return candidate
+
+
+def save_and_locate(conn, project_path: str | None = None, new_version: bool = False,
+                    info: dict | None = None) -> tuple[Path, bool]:
+    """(project file, whether FL saved): saves unless the file is known to be current."""
+    if info is None:
+        info = controller_info(conn)
+    if not new_version:
+        current = unchanged_project(info, project_path)
+        if current is not None:
+            return current, False
+    request = save_project(conn, new_version=new_version, project_path=project_path)
+    path = locate_saved_project(request, None if new_version else project_path, conn,
+                                search_only=new_version)
+    return path, True
+
+
 def current_project_file(conn, save: bool, project_path: str | None) -> Path:
     """The open project's .flp: saved first (Ctrl+S) unless save=False.
 
     With save=False, `project_path` or the last located project is used as is.
+    The save is skipped when FL has nothing unsaved and the file is the one FL
+    last saved (see unchanged_project).
     """
-    controller_info(conn)
+    info = controller_info(conn)
     if not save:
         if project_path:
             return Path(project_path).expanduser()
         if _last_project is not None:
             return _last_project
         raise ToolError("save=False needs project_path (the project was never located)")
-    started = save_project(conn)
-    return locate_saved_project(started, project_path)
+    return save_and_locate(conn, project_path, info=info)[0]
 
 
 def backup_project(path: Path) -> Path:
@@ -227,6 +463,7 @@ def write_atomically(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + ".mcp-tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
+    remember_file(path)
 
 
 def open_in_fl(path: Path) -> None:
@@ -287,6 +524,7 @@ def wait_for_reload(conn, before: dict, sentinel: str | None = None,
             continue
         if (info.get("instance_id") != before.get("instance_id")
                 or int(info.get("load_count") or 0) > int(before.get("load_count") or 0)):
+            reload_finished()
             return info
         if sentinel is not None:
             try:
@@ -295,8 +533,10 @@ def wait_for_reload(conn, before: dict, sentinel: str | None = None,
                 continue
             if status.get("success") and status.get("position") != sentinel:
                 time.sleep(0.5)  # let FL finish what follows the load
+                reload_finished()
                 return info
         elif time.time() - started >= MIN_RELOAD_WAIT:
+            reload_finished()
             return info
     raise ToolError(
         f"FL Studio did not finish reopening the project within {timeout:.0f} s. Check FL "

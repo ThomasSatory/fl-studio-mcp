@@ -66,6 +66,9 @@ class FLConnection:
         Raises:
             RuntimeError: If not connected or command fails
         """
+        from fl_studio_mcp.utils import project_files  # noqa: PLC0415 - avoids an import cycle
+
+        project_files.note_command(action)
         return self._midi.send_command(action, params, timeout)
 
     def get_status(self) -> dict[str, Any]:
