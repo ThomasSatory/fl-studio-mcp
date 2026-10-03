@@ -31,6 +31,14 @@ if mode == "partial_crash_once":
     if wav.exists():
         sys.exit(3)  # the partial file of the crash was left behind
     mode = "ok"
+shared = os.environ.get("FAKE_FL_SHARED")
+if shared:  # like FL's render instance: rewrite the shared settings files on the way out
+    shared = Path(shared)
+    (shared / "reg.xml").write_text("render instance")
+    (shared / "Recent files.scr").write_text("recent + " + str(flp))
+    (shared / "Mapping").mkdir(exist_ok=True)
+    (shared / "Mapping" / "Vel curve 2.env").write_text("new")
+    (shared / "Auto saved.ncp").write_text("created")
 if mode == "crash":
     os.kill(os.getpid(), signal.SIGSEGV)
 if mode == "sleep":
@@ -198,3 +206,83 @@ def test_partial_wav_of_a_crash_is_removed_before_the_retry(env, monkeypatch, tm
     path = render.render_wav(b"x", "s", 30, binary=fake)
     assert path.read_bytes().startswith(b"RIFF")
     assert counter.read_text() == "2"
+
+
+@pytest.fixture
+def shared(tmp_path, monkeypatch):
+    folder = tmp_path / "shared"
+    (folder / "Mapping").mkdir(parents=True)
+    (folder / "reg.xml").write_text("user settings")
+    (folder / "Recent files.scr").write_text("recent")
+    (folder / "Mapping" / "Vel curve 0.env").write_text("curve")
+    (folder / "untouched").write_text("same")
+    old = time.time() - 3600
+    os.utime(folder / "reg.xml", (old, old))
+    monkeypatch.setattr(render, "shared_fl_files", lambda: [
+        (folder, "reg.xml"), (folder, "Recent files.scr"), (folder, "Auto saved.ncp"),
+        (folder, "untouched"), (folder / "Mapping", "*.env"),
+    ])
+    monkeypatch.setenv("FAKE_FL_SHARED", str(folder))
+    return folder
+
+
+def _assert_restored(folder):
+    assert (folder / "reg.xml").read_text() == "user settings"
+    assert abs((folder / "reg.xml").stat().st_mtime - (time.time() - 3600)) < 60
+    assert (folder / "Recent files.scr").read_text() == "recent"
+    assert not (folder / "Auto saved.ncp").exists()  # did not exist before the render
+    assert sorted(p.name for p in (folder / "Mapping").iterdir()) == ["Vel curve 0.env"]
+    assert (folder / "untouched").read_text() == "same"
+
+
+def test_render_puts_back_the_shared_files_fl_rewrote(env, shared):
+    fake, _ = env
+    assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+    _assert_restored(shared)
+
+
+def test_shared_files_are_put_back_after_a_timeout(env, shared, monkeypatch):
+    fake, _ = env
+    monkeypatch.setenv("FAKE_FL_MODE", "sleep")
+    with pytest.raises(ToolError, match="did not finish"):
+        render.render_wav(b"x", "s", 1, binary=fake)
+    _assert_restored(shared)
+
+
+def test_shared_files_are_put_back_before_a_retry(env, shared, monkeypatch, tmp_path):
+    fake, _ = env
+    counter = tmp_path / "calls"
+    monkeypatch.setenv("FAKE_FL_MODE", "crash_once")
+    monkeypatch.setenv("FAKE_FL_COUNTER", str(counter))
+    seen = []
+    real = render._run_renderer
+
+    def spy(*args, **kwargs):
+        seen.append((shared / "reg.xml").read_text())  # what the next render starts from
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(render, "_run_renderer", spy)
+    assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+    assert seen == ["user settings", "user settings"]
+    _assert_restored(shared)
+
+
+def test_unchanged_shared_files_are_not_rewritten(tmp_path, monkeypatch):
+    folder = tmp_path / "s"
+    folder.mkdir()
+    (folder / "a").write_text("x")
+    monkeypatch.setattr(render, "shared_fl_files", lambda: [(folder, "a"), (folder, "*.env")])
+    snap = render.snapshot_shared_files()
+    assert render.restore_shared_files(snap) == []
+    (folder / "a").write_text("y")
+    (folder / "b.env").write_text("new")
+    assert sorted(p.name for p in render.restore_shared_files(snap)) == ["a", "b.env"]
+    assert (folder / "a").read_text() == "x" and not (folder / "b.env").exists()
+
+
+def test_shared_files_live_in_fl_user_data(monkeypatch, tmp_path):
+    monkeypatch.undo()  # the conftest stub
+    monkeypatch.setenv("FL_STUDIO_MCP_SETTINGS_DIR", str(tmp_path / "Settings"))
+    names = [(folder.name, pattern) for folder, pattern in render.shared_fl_files()]
+    assert ("Browser", "Recent files.scr") in names and ("Mapping", "*.env") in names
+    assert ("Note color presets", "Auto saved.ncp") in names

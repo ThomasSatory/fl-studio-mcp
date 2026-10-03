@@ -5,6 +5,14 @@ the project and exits. Only one render can run at a time, so renders are
 serialized with a lock shared between threads and processes. A failed render
 may exit 0 without writing anything, so the output file is what counts. The
 renderer also crashes now and then (killed by a signal); that is retried once.
+
+The render instance is a second FL Studio: when it exits it rewrites FL's
+shared settings files (reg.xml, the browser's recent files and search cache,
+note colour presets, velocity curves), and the FL Studio the user works in
+then crashed at its next save (EAccessViolation in FLEngine, 4 runs in 5
+live; none in 6 with the guard). So the bytes of those files are taken
+before each render and every file the render changed is put back (deleted
+if it did not exist) as soon as the render process has exited.
 """
 
 from __future__ import annotations
@@ -22,6 +30,8 @@ from pathlib import Path
 
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
+
 RENDER_KEEP = 30
 MIN_WAV_BYTES = 44  # a WAV header alone
 MIN_TIMEOUT, MAX_TIMEOUT = 90.0, 1200.0
@@ -32,6 +42,95 @@ RENDER_DIR_ENV = "FL_STUDIO_MCP_RENDER_DIR"
 SIGNAL_RETRIES = 1
 
 _thread_lock = threading.Lock()
+
+
+def shared_fl_files() -> list[tuple[Path, str]]:
+    """(folder, glob pattern) of FL's shared files a render instance rewrites on exit.
+
+    Seen live on macOS (FL 2025) with find -newer after a render. The
+    Settings files are found through get_fl_settings_base (the default user
+    data folder, or FL_STUDIO_MCP_SETTINGS_DIR); on Windows the same Settings
+    layout is assumed, and FL's registry settings (macOS: reg.xml) are not
+    guarded. A moved user data folder that the server does not know is
+    skipped silently: missing folders simply match nothing.
+    """
+    settings = get_fl_settings_base()
+    files = [
+        (settings / "Browser", "Recent files.scr"),
+        (settings / "Browser", "SearchCache"),
+        (settings / "Browser", "SearchCacheDate"),
+        (settings / "Note color presets", "Auto saved.ncp"),
+        (settings / "Mapping", "*.env"),
+    ]
+    if platform.system() == "Darwin":
+        files.insert(0, (Path.home() / "Library" / "Preferences" / "Image-Line", "reg.xml"))
+    return files
+
+
+# path -> (bytes, (atime_ns, mtime_ns)), or None when the file did not exist.
+Snapshot = dict[Path, "tuple[bytes, tuple[int, int]] | None"]
+
+
+def snapshot_shared_files() -> Snapshot:
+    """The current bytes of FL's shared files (see shared_fl_files)."""
+    snap: Snapshot = {}
+    for folder, pattern in shared_fl_files():
+        if any(ch in pattern for ch in "*?["):
+            paths = sorted(folder.glob(pattern)) if folder.is_dir() else []
+            snap[folder / pattern] = None  # marks the pattern: new matches get deleted
+        else:
+            paths = [folder / pattern]
+        for path in paths:
+            try:
+                st = path.stat()
+                snap[path] = (path.read_bytes(), (st.st_atime_ns, st.st_mtime_ns))
+            except OSError:
+                snap[path] = None
+    return snap
+
+
+def restore_shared_files(snap: Snapshot) -> list[Path]:
+    """Put back every shared file whose bytes changed since `snap`; returns them.
+
+    A file that did not exist before (or a new match of a guarded pattern)
+    is deleted. Nothing is printed: the server talks MCP over stdout.
+    """
+    changed: list[Path] = []
+    for folder, pattern in shared_fl_files():
+        if any(ch in pattern for ch in "*?[") and folder.is_dir():
+            for path in folder.glob(pattern):
+                if path not in snap:
+                    try:
+                        path.unlink()
+                        changed.append(path)
+                    except OSError:
+                        pass
+    for path, saved in snap.items():
+        if any(ch in path.name for ch in "*?["):
+            continue
+        try:
+            current = path.read_bytes() if path.exists() else None
+        except OSError:
+            continue
+        if saved is None:
+            if current is not None:
+                try:
+                    path.unlink()
+                    changed.append(path)
+                except OSError:
+                    pass
+            continue
+        data, times = saved
+        if current == data:
+            continue
+        try:
+            with open(path, "wb") as fh:  # in place: the user's FL may hold it open
+                fh.write(data)
+            os.utime(path, ns=times)
+            changed.append(path)
+        except OSError:
+            pass
+    return changed
 
 
 def find_fl_binary() -> Path:
@@ -235,7 +334,12 @@ def render_wav(
             flp.write_bytes(flp_data)
             wav = work / f"{name}.wav"
             for attempt in range(SIGNAL_RETRIES + 1):
-                returncode = _run_renderer(binary, flp, timeout)
+                shared = snapshot_shared_files()
+                try:
+                    returncode = _run_renderer(binary, flp, timeout)
+                finally:
+                    # Also after a timeout (the renderer was killed) and before a retry.
+                    restore_shared_files(shared)
                 if _wrote_wav(wav):
                     break
                 if returncode is None or returncode >= 0:
