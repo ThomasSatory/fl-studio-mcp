@@ -84,6 +84,31 @@ Réponse : `project`, `render` (chemin du WAV, durée de rendu), `analysis`
 LUFS, crête, bandes, part d'énergie dans le mix, `silent`), `stem_warnings`,
 `notes`.
 
+### Stems sans fuite (ajouté après la revue finale, vérifié en direct)
+
+Garder tout l'amont et tout l'aval laisse fuir du son. Une source en amont
+qui va aussi au Master laisse passer son signal sec dans le stem d'une
+reverb ; un sidechain de niveau 0 fait entrer la basse dans le stem du kick.
+Sur la copie du stem :
+
+- l'aval ne suit que les routes audio (niveau > 0, lu en direct par
+  `mixer.getRouting`), avec repli sur le fichier et une note si le
+  contrôleur ne répond pas ;
+- les routes des inserts gardés en amont vers toute destination hors de
+  amont(T) ∪ {T} sont mises à zéro dans leur événement 235, sans changer sa
+  longueur. Il est vérifié en direct que le moteur de rendu de FL respecte
+  une route mise à zéro ;
+- ce qui fuit encore (un insert en aval qui porte ses propres canaux) est
+  signalé dans `also_contains` et `stem_warnings` ;
+- `compare_stems` ne compare pas un stem de bus avec ses propres sources.
+
+Un bus est un insert (ni 0 ni le dernier) qui reçoit au moins deux inserts
+utilisés. Un simple envoi ou sidechain n'en fait donc pas un.
+
+L'outil est async : le travail bloquant tourne dans des threads, et la
+progression est envoyée après le mix et après chaque stem, pour les clients
+dont le délai est de 60 s.
+
 ### Erreurs
 
 Pas d'exécutable FL → message qui indique `FL_STUDIO_MCP_FL_BINARY`. Délai
