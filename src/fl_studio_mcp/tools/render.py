@@ -43,26 +43,29 @@ def _song_end_ticks(project: Project) -> int | None:
     return max(c.end for c in clips)
 
 
-def song_seconds(project: Project) -> float | None:
-    """Length of the current arrangement (end of its last clip) in seconds."""
+def song_seconds(project: Project, tempo: float | None = None) -> float | None:
+    """Length of the current arrangement (end of its last clip) in seconds.
+
+    tempo: BPM; default the file's (FL 2025 files may not store one).
+    """
     end = _song_end_ticks(project)
-    tempo = project.tempo
+    tempo = tempo or project.tempo
     if end is None or not tempo:
         return None
     return _seconds(end, project.ppq, tempo)
 
 
-def section_bounds(project: Project) -> list[dict]:
+def section_bounds(project: Project, tempo: float | None = None) -> list[dict]:
     """Sections of the song from the current arrangement's markers, in seconds and bars.
 
     Each marker starts a section that runs to the next one (the last runs to
     the end of the song); an implicit "Intro" covers the bars before a first
     marker placed after bar 1. Without markers, the song is cut into 8-bar
     blocks named "bars 1-8", "bars 9-16"... Empty when the song has no clips
-    or no tempo.
+    or no tempo. tempo: BPM; default the file's.
     """
     end = _song_end_ticks(project)
-    tempo = project.tempo
+    tempo = tempo or project.tempo
     if end is None or not tempo:
         return []
     timeline = Timeline(project.ppq, project.bar_ticks)
@@ -97,7 +100,9 @@ def section_bounds(project: Project) -> list[dict]:
 
 def _used_and_buses(routes: dict[int, set[int]], channel_targets: list[int],
                     last_insert: int) -> tuple[set[int], set[int]]:
-    """Inserts fed by a channel, and buses: inserts fed by another used insert."""
+    """Inserts fed by a channel, and buses: inserts fed by another used insert
+    and by no channel directly (a send to a track that has its own channel,
+    e.g. a sidechain, does not make it a bus)."""
     direct = {t for t in channel_targets if 1 <= t < last_insert}
     used = set(direct)
     buses: set[int] = set()
@@ -107,7 +112,8 @@ def _used_and_buses(routes: dict[int, set[int]], channel_targets: list[int],
         for dest in routes.get(source, ()):
             if dest == source or not 1 <= dest < last_insert:
                 continue
-            buses.add(dest)
+            if dest not in direct:
+                buses.add(dest)
             if dest not in used:
                 used.add(dest)
                 stack.append(dest)
@@ -120,7 +126,8 @@ def resolve_stems(spec: Any, routes: dict[int, set[int]], channel_targets: list[
 
     spec: None (no stems), a list of insert numbers (1 .. last_insert - 1),
     "all" (every insert fed by a channel, plus buses) or "buses" (inserts
-    fed by another used insert). At most MAX_STEMS per call.
+    fed by another used insert and by no channel). A send or sidechain
+    target fed by no channel still counts as a bus. At most MAX_STEMS per call.
     """
     if spec is None:
         return []
@@ -191,7 +198,9 @@ def register_render_tools(mcp: FastMCP) -> None:
         rendered alone (with the buses it feeds and the inserts feeding it)
         and compared: level, bands, share of the mix energy, masking in the
         low end, silent tracks. The WAVs stay in the renders folder; play one
-        with fl_preview_sample.
+        with fl_preview_sample. Each stem gives track, name, path, lufs,
+        peak_dbfs, share_pct (its energy as a % of the mix) and silent;
+        stem_warnings carries masking, dominant and silent tracks.
 
         Args:
             stems: mixer inserts to render alone - a list like [1, 3], "all"
@@ -238,7 +247,14 @@ def register_render_tools(mcp: FastMCP) -> None:
                     flp.insert_count(project) - 1,
                 )
 
-        length = song_seconds(project) if project is not None else None
+        tempo = project.tempo if project is not None else None
+        if project is not None and not tempo:
+            # FL 2025 files may store no tempo event: ask the running FL.
+            try:
+                tempo = float(run(conn, "transport.getTempo").get("tempo") or 0) or None
+            except (ToolError, TypeError, ValueError):
+                tempo = None
+        length = song_seconds(project, tempo) if project is not None else None
         timeout = render.render_timeout(length)
         started = time.monotonic()
         wav = render.render_wav(data, path.stem, timeout)
@@ -247,7 +263,7 @@ def register_render_tools(mcp: FastMCP) -> None:
         bounds = None
         if sections and project is not None:
             try:
-                bounds = section_bounds(project)
+                bounds = section_bounds(project, tempo)
             except FLPError as e:
                 notes.append(f"No sections: {e}")
             if bounds == []:
@@ -280,11 +296,12 @@ def register_render_tools(mcp: FastMCP) -> None:
                     name = names.get(t, f"Insert {t}")
                     try:
                         stem_data = flp.stem_project_bytes(data, t)
-                    except FLPError as e:
-                        raise ToolError(f"stem {t}: {e}") from e
-                    stem_wav = render.render_wav(
-                        stem_data, f"{path.stem} - stem {t} {name}", timeout)
-                    overall = mix_analysis.analyze_mix(stem_wav)["overall"]
+                        stem_wav = render.render_wav(
+                            stem_data, f"{path.stem} - stem {t} {name}", timeout)
+                        overall = mix_analysis.analyze_mix(stem_wav)["overall"]
+                    except (ToolError, FLPError) as e:
+                        stem_warnings.append(f"stem {t} ({name}) not rendered: {e}")
+                        continue
                     peak = overall.get("peak_dbfs")
                     out.append({
                         "track": t,
@@ -297,21 +314,30 @@ def register_render_tools(mcp: FastMCP) -> None:
                         "bands": overall.get("bands"),
                         "silent": peak is None or peak < mix_analysis.SILENCE_DBFS,
                     })
-                total = sum(_energy(s["rms_dbfs"]) for s in out)
+                mix_energy = _energy(analysis["overall"].get("rms_dbfs"))
                 for s in out:
-                    s["share_pct"] = (round(100 * _energy(s["rms_dbfs"]) / total, 1)
-                                      if total > 0 else 0.0)
-                master = [c for c in channels if int(c.get("target_fx_track") or 0) == 0]
-                if master:
+                    s["share_pct"] = (round(100 * _energy(s["rms_dbfs"]) / mix_energy, 1)
+                                      if mix_energy > 0 else None)
+                # Master and the last insert ('Current') are never disabled.
+                last = flp.insert_count(project) - 1
+                automation = {a.channel for a in flp.automation_clips(project)}
+                always = [
+                    c for c in channels
+                    if int(c.get("target_fx_track") or 0) in (0, last)
+                    and c.get("type") != "automation_clip"
+                    and c.get("index") not in automation
+                ]
+                if always:
                     who = ", ".join(str(c.get("name") or f"channel {c.get('index')}")
-                                    for c in master)
+                                    for c in always)
                     stem_warnings.append(
-                        f"{len(master)} channel(s) play straight into Master and are in "
-                        f"every stem: {who}")
+                        f"{len(always)} channel(s) play straight into Master (or the last "
+                        f"insert, {last}) and are in every stem: {who}")
                 stem_warnings += mix_analysis.compare_stems(out)
                 if len(out) > 1:
-                    notes.append("A bus stem includes the tracks that feed it, so shares "
-                                 "can add up to more than the mix.")
+                    notes.append("share_pct is a stem's energy as a % of the whole mix; a bus "
+                                 "stem includes the tracks that feed it, so shares can add "
+                                 "up to more than 100.")
             result["stems"] = out
             result["stem_warnings"] = stem_warnings
 

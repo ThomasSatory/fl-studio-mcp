@@ -21,10 +21,12 @@ BAR = 384  # ticks per 4/4 bar at ppq 96; 2 s at 120 BPM
 
 
 def song(bars: int = 16, markers: list[tuple[int, str]] | None = None,
-         tempo: int | None = 120000) -> Project:
-    """A project whose arrangement ends at `bars` bars, with these markers (ticks, name)."""
-    project = build_project(clips=[(0, 1, bars * BAR, 0)])
-    events = [e for e in project.events if e.id not in (148, 205)]
+         tempo: int | None = 120000, beats: int = 4) -> Project:
+    """A project whose arrangement ends at `bars` bars of `beats`/4, with these markers."""
+    bar = BAR * beats // 4
+    project = build_project(clips=[(0, 1, bars * bar, 0)])
+    events = [Event(17, beats) if e.id == 17 else e
+              for e in project.events if e.id not in (148, 205)]
     at = next(i for i, e in enumerate(events) if e.id == 238)
     for pos, name in reversed(markers or []):
         events[at:at] = [Event(148, pos), Event(205, encode_text(name))]
@@ -69,6 +71,20 @@ def test_eight_bar_blocks_without_markers():
     assert render_tool.section_bounds(song(20, tempo=None)) == []
 
 
+def test_explicit_tempo_when_the_file_has_none():
+    project = song(16, tempo=None)
+    assert render_tool.song_seconds(project, 60.0) == pytest.approx(64.0)
+    sections = render_tool.section_bounds(project, 120.0)
+    assert [s["end_seconds"] for s in sections] == [16.0, 32.0]
+
+
+def test_sections_in_three_four():
+    sections = render_tool.section_bounds(song(12, beats=3))
+    assert [(s["name"], s["start_seconds"], s["end_seconds"], s["end_bar"])
+            for s in sections] == [("bars 1-8", 0.0, 12.0, 9.0),
+                                   ("bars 9-12", 12.0, 18.0, 13.0)]
+
+
 # ------------------------------------------------------------------ stems
 
 # 0 Master, 1 Kick -> 0, 2 Bass -> 3, 3 Bass bus -> 0, 4 'Current'
@@ -91,6 +107,13 @@ def test_resolve_all_and_buses():
         render_tool.resolve_stems("buses", ROUTES, [1], LAST)
     with pytest.raises(ToolError, match="'all' or 'buses'"):
         render_tool.resolve_stems("drums", ROUTES, [1, 2], LAST)
+
+
+def test_buses_ignore_send_targets_fed_by_a_channel():
+    # 1 (Kick) sends to 2 (Pad, has its own channel) and to 3 (fed by no channel)
+    routes = {0: set(), 1: {0, 2, 3}, 2: {0}, 3: {0}, 4: {0}}
+    assert render_tool.resolve_stems("buses", routes, [1, 2], LAST) == [3]
+    assert render_tool.resolve_stems("all", routes, [1, 2], LAST) == [1, 2, 3]
 
 
 def test_resolve_too_many_stems():
@@ -120,16 +143,22 @@ def write_wav(path: Path, freq: float, amp: float, seconds: float = 6.0,
 class FakeFL:
     def __init__(self):
         self.calls = []
+        self.tempo = 120.0
 
     def send_command(self, action, params=None, timeout=2.0):
         self.calls.append(action)
         if action == "system.info":
             return {"success": True, "controller_version": 3}
+        if action == "transport.getTempo":
+            return {"success": True, "tempo": self.tempo}
         if action == "channels.getAll":
             return {"success": True, "channels": [
-                {"index": 0, "name": "Kick", "target_fx_track": 1},
-                {"index": 1, "name": "Bass", "target_fx_track": 2},
-                {"index": 2, "name": "Pad", "target_fx_track": 0},
+                {"index": 0, "name": "Kick", "type": "sampler", "target_fx_track": 1},
+                {"index": 1, "name": "Bass", "type": "plugin", "target_fx_track": 2},
+                {"index": 2, "name": "Pad", "type": "plugin", "target_fx_track": 0},
+                {"index": 3, "name": "Fade out", "type": "automation_clip",
+                 "target_fx_track": 0},
+                {"index": 4, "name": "Vox", "type": "audio_clip", "target_fx_track": 4},
             ]}
         if action == "mixer.getAllTracks":
             return {"success": True, "tracks": [
@@ -145,17 +174,20 @@ def enabled(data: bytes) -> list[int]:
     return [i for i, f in enumerate(flags) if f & INSERT_ENABLED]
 
 
-@pytest.fixture
-def tool(tmp_path, monkeypatch):
-    project = song(8, [(0, "Intro"), (2 * BAR, "Drop")])
+@pytest.fixture(params=[120000])
+def tool(tmp_path, monkeypatch, request):
+    project = song(8, [(0, "Intro"), (2 * BAR, "Drop")], tempo=request.param)
     add_mixer(project, [sorted(ROUTES[i]) for i in range(LAST + 1)])
     flp_path = tmp_path / "My Song.flp"
     flp_path.write_bytes(project.to_bytes())
     fake = FakeFL()
     renders = []
+    fail_on = set()
 
     def fake_render(data, name, timeout):
         renders.append({"name": name, "data": data, "timeout": timeout})
+        if any(f"stem {t} " in name for t in fail_on):
+            raise ToolError("FL Studio wrote no audio file (exit code 0).")
         if "stem 1" in name:
             freq, amp = 50.0, 0.5
         elif "stem 2" in name or "stem 3" in name:
@@ -174,6 +206,7 @@ def tool(tmp_path, monkeypatch):
     monkeypatch.setattr(render_util, "render_wav", fake_render)
     mcp = RecordingMCP()
     render_tool.register_render_tools(mcp)
+    fake.fail_on = fail_on
     return mcp.tools["fl_render_mix"], fake, renders, flp_path
 
 
@@ -215,10 +248,13 @@ def test_render_mix_with_stems(tool):
     stems = result["stems"]
     assert [(s["track"], s["name"]) for s in stems] == [
         (1, "Kick"), (2, "Bass"), (3, "Bass bus")]
-    assert sum(s["share_pct"] for s in stems) == pytest.approx(100, abs=0.2)
+    # shares of the MIX energy (rms 0.5 vs 0.4 amplitude; dB values are rounded)
+    assert [s["share_pct"] for s in stems] == pytest.approx([100.0, 64.0, 64.0], abs=1.0)
     assert all(not s["silent"] and s["bands"]["sub"] > 35 for s in stems)
     warnings = " ".join(result["stem_warnings"])
-    assert "1 channel(s) play straight into Master and are in every stem: Pad" in warnings
+    assert ("2 channel(s) play straight into Master (or the last insert, 4) and are in "
+            "every stem: Pad, Vox") in warnings
+    assert "Fade out" not in warnings
     assert "mask each other" in warnings
     assert "channels.getAll" in fake.calls and "mixer.getAllTracks" in fake.calls
 
@@ -240,3 +276,33 @@ def test_unreadable_project_still_renders_the_mix(tool):
     assert result["stems"] == []
     assert "Stems not rendered" in result["stem_warnings"][0]
     assert any("could not be read" in n for n in result["notes"])
+
+
+@pytest.mark.parametrize("tool", [None], indirect=True)
+def test_live_tempo_when_the_file_has_none(tool):
+    fl_render_mix, fake, renders, _ = tool
+    result = fl_render_mix()
+    assert "transport.getTempo" in fake.calls
+    assert [s["name"] for s in result["analysis"]["sections"]] == ["Intro", "Drop"]
+    assert renders[0]["timeout"] == render_util.render_timeout(16.0)
+
+
+def test_a_failed_stem_keeps_the_mix_and_the_other_stems(tool):
+    fl_render_mix, fake, renders, _ = tool
+    fake.fail_on.add(2)
+    result = fl_render_mix(stems=[1, 2, 3])
+    assert len(renders) == 4
+    assert [s["track"] for s in result["stems"]] == [1, 3]
+    assert "stem 2 (Bass) not rendered: FL Studio wrote no audio file" in " ".join(
+        result["stem_warnings"])
+    assert result["analysis"]["overall"]["lufs"] is not None
+
+
+def test_project_that_does_not_round_trip_refuses_stems_only(tool, monkeypatch):
+    fl_render_mix, _, renders, _ = tool
+    monkeypatch.setattr(Project, "to_bytes", lambda self: b"different")
+    result = fl_render_mix(stems="all")
+    assert len(renders) == 1
+    assert result["stems"] == []
+    assert "cannot rewrite byte for byte" in result["stem_warnings"][0]
+    assert [s["name"] for s in result["analysis"]["sections"]] == ["Intro", "Drop"]
