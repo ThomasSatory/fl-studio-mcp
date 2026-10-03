@@ -422,17 +422,6 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
     """Register the file-based arrangement tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
 
-    def _current_file(conn, save: bool, project_path: str | None) -> Path:
-        project_files.controller_info(conn)
-        if not save:
-            if project_path:
-                return Path(project_path).expanduser()
-            if project_files._last_project is not None:
-                return project_files._last_project
-            raise ToolError("save=False needs project_path (the project was never located)")
-        started = project_files.save_project(conn)
-        return project_files.locate_saved_project(started, project_path)
-
     @mcp.tool(annotations=IDEMPOTENT)
     def fl_save_project(new_version: bool = False, project_path: str | None = None) -> dict:
         """Save the open project (Ctrl+S) and return the path of the saved .flp.
@@ -466,7 +455,7 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
             arrangement: arrangement index (default: the current one)
         """
         conn = get_connection()
-        path = _current_file(conn, save, project_path)
+        path = project_files.current_project_file(conn, save, project_path)
         project, _ = _load_checked(path)
         try:
             arr = project.arrangement(arrangement)
@@ -534,7 +523,7 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
         conn = get_connection()
         info = project_files.controller_info(conn)
         patterns = _live_patterns(conn)
-        path = _current_file(conn, True, project_path)
+        path = project_files.current_project_file(conn, True, project_path)
         project, _ = _load_checked(path)
         try:
             arr = project.arrangement(arrangement)
@@ -617,7 +606,7 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
             checked.append((file, sample.get("name") or file.stem, sample.get("mixer_track")))
         conn = get_connection()
         info = project_files.controller_info(conn)
-        path = _current_file(conn, True, project_path)
+        path = project_files.current_project_file(conn, True, project_path)
         project, _ = _load_checked(path)
         added = []
         try:

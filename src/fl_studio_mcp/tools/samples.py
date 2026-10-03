@@ -403,7 +403,8 @@ def register_sample_tools(mcp: FastMCP) -> None:
         balance, where the sound ends and (for tonal sounds like 808s) its pitch.
 
         Use it on a sample before loading it (to tune an 808 to the song's key)
-        or on a mixdown exported from FL (File > Export) to check the mix.
+        or on any audio file. To check the project's own mix, use
+        fl_render_mix instead: it renders the song and measures it in one call.
         At most 60 s are analysed from start_seconds.
         """
         target = Path(path).expanduser()

@@ -1,0 +1,321 @@
+"""Listen to the mix: render the saved project to WAV and measure it.
+
+FL Studio's scripting API cannot render. fl_render_mix saves the project,
+runs FL's command-line renderer on a copy of the saved .flp (about 20 s per
+render, one render at a time), then analyses the WAV as a whole and section
+by section (playlist markers, or 8-bar blocks). Per-mixer-track stems are
+rendered from copies of the file where every unrelated insert is disabled:
+the renderer ignores solo flags.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from typing import TYPE_CHECKING, Any
+
+from fastmcp.exceptions import ToolError
+
+from fl_studio_mcp.tools.annotations import ACTION
+from fl_studio_mcp.tools.arrangement import Timeline
+from fl_studio_mcp.utils import flp, mix_analysis, project_files, render
+from fl_studio_mcp.utils.errors import run
+from fl_studio_mcp.utils.flp import FLPError, Project
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
+
+MAX_STEMS = 8
+BLOCK_BARS = 8
+
+
+def _seconds(ticks: int, ppq: int, tempo: float) -> float:
+    return ticks / ppq * 60.0 / tempo
+
+
+def _song_end_ticks(project: Project) -> int | None:
+    try:
+        clips = project.arrangement().clips
+    except FLPError:
+        return None
+    if not clips:
+        return None
+    return max(c.end for c in clips)
+
+
+def song_seconds(project: Project) -> float | None:
+    """Length of the current arrangement (end of its last clip) in seconds."""
+    end = _song_end_ticks(project)
+    tempo = project.tempo
+    if end is None or not tempo:
+        return None
+    return _seconds(end, project.ppq, tempo)
+
+
+def section_bounds(project: Project) -> list[dict]:
+    """Sections of the song from the current arrangement's markers, in seconds and bars.
+
+    Each marker starts a section that runs to the next one (the last runs to
+    the end of the song); an implicit "Intro" covers the bars before a first
+    marker placed after bar 1. Without markers, the song is cut into 8-bar
+    blocks named "bars 1-8", "bars 9-16"... Empty when the song has no clips
+    or no tempo.
+    """
+    end = _song_end_ticks(project)
+    tempo = project.tempo
+    if end is None or not tempo:
+        return []
+    timeline = Timeline(project.ppq, project.bar_ticks)
+    markers = sorted(project.arrangement().markers, key=lambda m: m.position)
+    starts: list[tuple[int, str]] = []
+    for n, marker in enumerate(markers):
+        if marker.position >= end:
+            break
+        if starts and starts[-1][0] == marker.position:
+            continue
+        starts.append((marker.position, marker.name or f"marker {n + 1}"))
+    if not starts:
+        last_bar = math.ceil(end / timeline.bar_ticks)
+        step = BLOCK_BARS * timeline.bar_ticks
+        for pos in range(0, end, step):
+            first = pos // timeline.bar_ticks + 1
+            starts.append((pos, f"bars {first}-{min(first + BLOCK_BARS - 1, last_bar)}"))
+    elif starts[0][0] > 0:
+        starts.insert(0, (0, "Intro"))
+    sections = []
+    for n, (pos, name) in enumerate(starts):
+        stop = starts[n + 1][0] if n + 1 < len(starts) else end
+        sections.append({
+            "name": name,
+            "start_seconds": round(_seconds(pos, project.ppq, tempo), 3),
+            "end_seconds": round(_seconds(stop, project.ppq, tempo), 3),
+            "start_bar": timeline.bar(pos),
+            "end_bar": timeline.bar(stop),
+        })
+    return sections
+
+
+def _used_and_buses(routes: dict[int, set[int]], channel_targets: list[int],
+                    last_insert: int) -> tuple[set[int], set[int]]:
+    """Inserts fed by a channel, and buses: inserts fed by another used insert."""
+    direct = {t for t in channel_targets if 1 <= t < last_insert}
+    used = set(direct)
+    buses: set[int] = set()
+    stack = list(direct)
+    while stack:
+        source = stack.pop()
+        for dest in routes.get(source, ()):
+            if dest == source or not 1 <= dest < last_insert:
+                continue
+            buses.add(dest)
+            if dest not in used:
+                used.add(dest)
+                stack.append(dest)
+    return direct, buses
+
+
+def resolve_stems(spec: Any, routes: dict[int, set[int]], channel_targets: list[int],
+                  last_insert: int) -> list[int]:
+    """Mixer inserts to render as stems.
+
+    spec: None (no stems), a list of insert numbers (1 .. last_insert - 1),
+    "all" (every insert fed by a channel, plus buses) or "buses" (inserts
+    fed by another used insert). At most MAX_STEMS per call.
+    """
+    if spec is None:
+        return []
+    if isinstance(spec, str):
+        direct, buses = _used_and_buses(routes, channel_targets, last_insert)
+        if spec == "all":
+            targets = sorted(direct | buses)
+        elif spec == "buses":
+            targets = sorted(buses)
+        else:
+            raise ToolError(f"stems must be a list of mixer tracks, 'all' or 'buses'; "
+                            f"got {spec!r}")
+        if not targets:
+            raise ToolError(f"stems={spec!r} matches no mixer track in this project")
+    elif isinstance(spec, (list, tuple)):
+        targets = []
+        for t in spec:
+            if isinstance(t, bool) or not isinstance(t, int) or not 1 <= t < last_insert:
+                raise ToolError(f"stem track {t!r} is not a usable mixer insert "
+                                f"(valid: 1..{last_insert - 1})")
+            if t not in targets:
+                targets.append(t)
+        if not targets:
+            return []
+    else:
+        raise ToolError(f"stems must be a list of mixer tracks, 'all' or 'buses'; got {spec!r}")
+    if len(targets) > MAX_STEMS:
+        raise ToolError(
+            f"{len(targets)} stems requested ({targets}); at most {MAX_STEMS} per call "
+            "(each takes about 20 s). Split them over several calls with explicit lists, "
+            f"e.g. stems={targets[:MAX_STEMS]}."
+        )
+    return targets
+
+
+def _energy(rms_dbfs: float | None) -> float:
+    return 10 ** (rms_dbfs / 10) if rms_dbfs is not None else 0.0
+
+
+def register_render_tools(mcp: FastMCP) -> None:
+    """Register fl_render_mix with the MCP server."""
+    from fl_studio_mcp.utils.connection import get_connection
+
+    @mcp.tool(annotations=ACTION)
+    def fl_render_mix(
+        stems: list[int] | str | None = None,
+        sections: bool = True,
+        save: bool = True,
+        project_path: str | None = None,
+    ) -> dict:
+        """Render the song to WAV with FL Studio and measure the mix: listen to your work.
+
+        Use it after changing the mix or the arrangement, to check the result
+        instead of guessing. It saves the project (Ctrl+S) and renders the
+        SAVED file in the background with FL's command-line renderer: about
+        20 s for the whole song, plus about 20 s per stem, one render at a time.
+
+        Returns overall loudness (integrated LUFS, short-term max), sample and
+        true peak, RMS, crest factor, samples over 0 dBFS, the energy in 5
+        bands (sub <60 Hz, low, low_mid, high_mid, air >6 kHz), stereo width
+        and correlation, leading/trailing silence, per-section figures
+        (playlist markers, else 8-bar blocks) and plain-language warnings.
+        Look at the warnings first, then: LUFS near -14 for streaming, true
+        peak below -1 dBTP, crest above ~6 dB, sections much quieter or
+        louder than the rest, a band share that is way off for the genre.
+
+        Stems answer "which track causes it": each requested mixer insert is
+        rendered alone (with the buses it feeds and the inserts feeding it)
+        and compared: level, bands, share of the mix energy, masking in the
+        low end, silent tracks. The WAVs stay in the renders folder; play one
+        with fl_preview_sample.
+
+        Args:
+            stems: mixer inserts to render alone - a list like [1, 3], "all"
+                   (every insert a channel plays into, plus buses) or "buses";
+                   at most 8 per call. Default: none (fastest).
+            sections: also analyse each section of the song (default True)
+            save: save first so the render matches FL (default True)
+            project_path: the open project's .flp, when it cannot be found automatically
+        """
+        conn = get_connection()
+        path = project_files.current_project_file(conn, save, project_path)
+        data = path.read_bytes()
+        notes = [
+            "The render is of the saved .flp file, not of what is playing in FL.",
+        ]
+        if not save:
+            notes.append("save=False: unsaved changes in FL are not in this render.")
+
+        project: Project | None
+        try:
+            project = Project.parse(data)
+        except FLPError as e:
+            project = None
+            notes.append(f"The project file could not be read ({e}): the mix was rendered "
+                         "without sections or stems.")
+
+        # Resolve the stems before spending time on the render.
+        targets: list[int] = []
+        channels: list[dict] = []
+        stems_refused = None
+        if stems is not None:
+            if project is None:
+                stems_refused = "the project file could not be read"
+            elif project.to_bytes() != data:
+                stems_refused = (f"{path} uses a layout this server cannot rewrite byte "
+                                 "for byte")
+            elif flp.insert_count(project) < 3:
+                stems_refused = "the project file has no mixer inserts to render alone"
+            else:
+                channels = run(conn, "channels.getAll").get("channels", [])
+                targets = resolve_stems(
+                    stems, flp.mixer_routes(project),
+                    [int(c.get("target_fx_track") or 0) for c in channels],
+                    flp.insert_count(project) - 1,
+                )
+
+        length = song_seconds(project) if project is not None else None
+        timeout = render.render_timeout(length)
+        started = time.monotonic()
+        wav = render.render_wav(data, path.stem, timeout)
+        elapsed = round(time.monotonic() - started, 1)
+
+        bounds = None
+        if sections and project is not None:
+            try:
+                bounds = section_bounds(project)
+            except FLPError as e:
+                notes.append(f"No sections: {e}")
+            if bounds == []:
+                notes.append("No sections: the arrangement has no clips or the file no tempo.")
+                bounds = None
+            elif bounds:
+                notes.append("Section times come from the project tempo; tempo automation "
+                             "shifts them.")
+        analysis = mix_analysis.analyze_mix(wav, bounds)
+
+        result: dict[str, Any] = {
+            "project": str(path),
+            "render": {"path": str(wav), "seconds": elapsed},
+            "analysis": analysis,
+        }
+
+        if stems is not None:
+            stem_warnings: list[str] = []
+            out: list[dict] = []
+            if stems_refused:
+                stem_warnings.append(f"Stems not rendered: {stems_refused}.")
+            else:
+                try:
+                    tracks = run(conn, "mixer.getAllTracks", {"include_empty": True})
+                    names = {int(t["index"]): t.get("name") or f"Insert {t['index']}"
+                             for t in tracks.get("tracks", [])}
+                except (ToolError, KeyError, TypeError, ValueError):
+                    names = {}
+                for t in targets:
+                    name = names.get(t, f"Insert {t}")
+                    try:
+                        stem_data = flp.stem_project_bytes(data, t)
+                    except FLPError as e:
+                        raise ToolError(f"stem {t}: {e}") from e
+                    stem_wav = render.render_wav(
+                        stem_data, f"{path.stem} - stem {t} {name}", timeout)
+                    overall = mix_analysis.analyze_mix(stem_wav)["overall"]
+                    peak = overall.get("peak_dbfs")
+                    out.append({
+                        "track": t,
+                        "name": name,
+                        "path": str(stem_wav),
+                        "lufs": overall.get("lufs"),
+                        "peak_dbfs": peak,
+                        "true_peak_dbfs": overall.get("true_peak_dbfs"),
+                        "rms_dbfs": overall.get("rms_dbfs"),
+                        "bands": overall.get("bands"),
+                        "silent": peak is None or peak < mix_analysis.SILENCE_DBFS,
+                    })
+                total = sum(_energy(s["rms_dbfs"]) for s in out)
+                for s in out:
+                    s["share_pct"] = (round(100 * _energy(s["rms_dbfs"]) / total, 1)
+                                      if total > 0 else 0.0)
+                master = [c for c in channels if int(c.get("target_fx_track") or 0) == 0]
+                if master:
+                    who = ", ".join(str(c.get("name") or f"channel {c.get('index')}")
+                                    for c in master)
+                    stem_warnings.append(
+                        f"{len(master)} channel(s) play straight into Master and are in "
+                        f"every stem: {who}")
+                stem_warnings += mix_analysis.compare_stems(out)
+                if len(out) > 1:
+                    notes.append("A bus stem includes the tracks that feed it, so shares "
+                                 "can add up to more than the mix.")
+            result["stems"] = out
+            result["stem_warnings"] = stem_warnings
+
+        notes.append(f"WAV files are kept in {render.renders_dir()} (the 30 most recent); "
+                     "play one with fl_preview_sample.")
+        result["notes"] = notes
+        return result

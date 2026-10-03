@@ -236,6 +236,8 @@ Using a different MCP-compatible client (Gemini, an OpenAI-based tool, Cursor, e
 |---|---|
 | `FL_STUDIO_MCP_MIDI_PORT` | Name (or case-insensitive substring) of the MIDI output port to use. Without it the server only accepts a port containing `IAC`, `loopMIDI` or `Midi Through`, and refuses to send anything to another device (a hardware synth would otherwise receive the trigger note). |
 | `FL_STUDIO_MCP_SETTINGS_DIR` | FL Studio's `Settings` folder when it is not the default (Options > File settings > User data folder). |
+| `FL_STUDIO_MCP_FL_BINARY` | Full path of FL Studio's executable for `fl_render_mix`, when it is not found in `/Applications` (macOS: `FL Studio 2025.app/Contents/MacOS/OsxFL`) or `Program Files\Image-Line` (Windows: `FL64.exe`). |
+| `FL_STUDIO_MCP_RENDER_DIR` | Folder where `fl_render_mix` keeps its WAV files (default: `~/Library/Caches/fl-studio-mcp/renders` on macOS, `%LOCALAPPDATA%\fl-studio-mcp\renders` on Windows, `~/.cache/fl-studio-mcp/renders` elsewhere). |
 
 On a French macOS the IAC bus is called `Gestionnaire IAC Bus 1`; it contains `IAC`, so it is picked up automatically.
 
@@ -387,6 +389,39 @@ retarget it before writing notes to a specific channel.
 | `fl_analyze_audio` | Peak/RMS dBFS, clipping, stereo width, low/mid/high balance, pitch (to tune 808s) |
 | `fl_preview_sample` | Play a file on the computer's speakers (macOS) |
 
+### Listening to the mix
+
+| Tool | Description |
+|------|-------------|
+| `fl_render_mix` | Save, render the song to WAV with FL Studio and measure it (LUFS, true peak, crest, bands, stereo, sections, warnings); optionally render and compare per-mixer-track stems |
+
+`fl_render_mix` lets the assistant check a mix or an arrangement change
+instead of guessing. It saves the project (Ctrl+S) and runs FL Studio's
+command-line renderer (`OsxFL -R -Ewav` on macOS) on a copy of the **saved**
+file, in the background: the open FL Studio is not touched. A render takes
+about 20 s for the whole song, plus about 20 s per stem, and renders run one
+at a time. The WAV is analysed as a whole (integrated and short-term LUFS
+per ITU-R BS.1770, sample and true peak, RMS, crest factor, samples over
+0 dBFS, energy in 5 bands, stereo width and correlation, silence at both
+ends) and section by section: the playlist markers of the current
+arrangement, or 8-bar blocks without markers. Section times come from the
+project tempo; tempo automation shifts them.
+
+`stems=[1, 3]`, `stems="buses"` or `stems="all"` (8 per call at most) renders
+mixer inserts alone and compares them: level, band balance, share of the mix
+energy, two tracks fighting in the low end, a track that dominates or is
+silent. FL's renderer ignores solo flags, so each stem is a copy of the
+project where every insert unrelated to the target is disabled (the target
+keeps the inserts feeding it and the buses it feeds). Channels routed straight
+to the Master are in every stem; the tool says so.
+
+The WAV files stay in the renders folder (the 30 most recent are kept, see
+`FL_STUDIO_MCP_RENDER_DIR`); `fl_preview_sample` plays one. A render that
+takes too long is stopped: FL is probably waiting on a dialog (missing
+plugin, demo limitation). Verified on macOS with FL Studio 2025; the Windows
+command (`FL64.exe /R /Ewav <file>`) is Image-Line's documented form but has
+not been tested.
+
 ### Plugins
 
 | Tool | Description |
@@ -479,6 +514,13 @@ are.
 | `fl_trigger_script` | Manually trigger the FL Studio script |
 | `fl_get_piano_roll_info` | Get piano roll system info |
 | `fl_clear_request_queue` | Cancel pending queued changes |
+
+### Changed in 0.5.0
+
+New tool `fl_render_mix`: the server can now render the project with FL
+Studio's command-line renderer and analyse the result (whole song, sections
+and per-track stems). It needs numpy (installed with the package). The
+server instructions no longer tell the assistant to ask you for an export.
 
 ### Changed in 0.4.0
 

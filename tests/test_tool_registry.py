@@ -39,7 +39,7 @@ ACTION = {
     "fl_trigger_script", "fl_next_preset", "fl_prev_preset", "fl_new_pattern",
     "fl_clone_pattern", "fl_save_undo_point", "fl_mute_track", "fl_solo_track",
     "fl_arm_track", "fl_mute_channel", "fl_solo_channel",
-    "fl_add_marker", "fl_preview_sample", "fl_get_mixer_levels",
+    "fl_add_marker", "fl_preview_sample", "fl_get_mixer_levels", "fl_render_mix",
 }
 REMOVED = {
     "fl_get_channel_count", "fl_get_selected_channel", "fl_select_one_channel",
@@ -60,7 +60,7 @@ def hints(tool):
 
 def test_exact_tool_set():
     names = set(registered())
-    assert len(names) == 83
+    assert len(names) == 84
     assert names == READ_ONLY | IDEMPOTENT | DESTRUCTIVE | ACTION
     assert not names & REMOVED
 
@@ -88,7 +88,8 @@ def test_instructions_match_the_tool_set():
     assert "C4 = 60" in text and "C5" in text
     for name in ("fl_get_project_snapshot", "fl_open_piano_roll", "fl_send_chord",
                  "fl_save_undo_point", "fl_connection_status", "fl_edit_arrangement",
-                 "fl_get_arrangement", "fl_write_steps", "fl_add_sample_channels"):
+                 "fl_get_arrangement", "fl_write_steps", "fl_add_sample_channels",
+                 "fl_render_mix"):
         assert name in text, name
     for name in REMOVED:
         assert not re.search(rf"\b{name}\b", text), name

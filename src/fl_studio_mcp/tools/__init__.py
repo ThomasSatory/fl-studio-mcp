@@ -9,6 +9,7 @@ from fl_studio_mcp.tools.piano_roll import register_piano_roll_tools
 from fl_studio_mcp.tools.playlist import register_playlist_tools
 from fl_studio_mcp.tools.plugins import register_plugin_tools
 from fl_studio_mcp.tools.project import register_project_tools
+from fl_studio_mcp.tools.render import register_render_tools
 from fl_studio_mcp.tools.samples import register_sample_tools
 from fl_studio_mcp.tools.transport import register_transport_tools
 from fl_studio_mcp.tools.ui import register_ui_tools
@@ -26,4 +27,5 @@ __all__ = [
     "register_arrangement_tools",
     "register_playlist_tools",
     "register_sample_tools",
+    "register_render_tools",
 ]

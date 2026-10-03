@@ -26,6 +26,7 @@ from fl_studio_mcp.tools import (
     register_playlist_tools,
     register_plugin_tools,
     register_project_tools,
+    register_render_tools,
     register_sample_tools,
     register_transport_tools,
     register_ui_tools,
@@ -79,6 +80,16 @@ Domains:
 - Undo: fl_save_undo_point before a batch of live edits, fl_undo, fl_redo
 - Windows: show, hide, focus; fl_open_piano_roll(channel)
 
+Listening to the mix:
+- fl_render_mix saves the project, renders the saved file to WAV with FL's
+  command-line renderer (~20 s, plus ~20 s per stem; one render at a time)
+  and measures it: LUFS, true peak, crest, band balance, stereo, silence,
+  per-section figures (playlist markers or 8-bar blocks) and warnings. Run it
+  after mix or arrangement changes to check the result.
+- stems=[3, 5] / "buses" / "all" (max 8 per call) renders mixer inserts
+  alone and compares them (masking, dominant or silent tracks). The WAVs can
+  be played to the user with fl_preview_sample.
+
 Piano roll rules:
 - ComposeWithLLM must have been run once by hand in this FL Studio session
   (piano roll > Tools > Scripting); on macOS the app running this server
@@ -89,8 +100,6 @@ Limits:
 - fl_trigger_note plays a note in real time only; it is not recorded unless
   FL Studio is recording.
 - FL's undo does not track every scripting change (pattern renames).
-- Rendering audio is not scriptable: ask the user to export (File > Export)
-  and analyse the file with fl_analyze_audio.
 """,
 )
 
@@ -179,6 +188,7 @@ register_project_tools(mcp)
 register_arrangement_tools(mcp)
 register_playlist_tools(mcp)
 register_sample_tools(mcp)
+register_render_tools(mcp)
 
 
 def main():

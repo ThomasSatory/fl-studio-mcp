@@ -164,6 +164,22 @@ def locate_saved_project(started: float, project_path: str | None = None) -> Pat
     )
 
 
+def current_project_file(conn, save: bool, project_path: str | None) -> Path:
+    """The open project's .flp: saved first (Ctrl+S) unless save=False.
+
+    With save=False, `project_path` or the last located project is used as is.
+    """
+    controller_info(conn)
+    if not save:
+        if project_path:
+            return Path(project_path).expanduser()
+        if _last_project is not None:
+            return _last_project
+        raise ToolError("save=False needs project_path (the project was never located)")
+    started = save_project(conn)
+    return locate_saved_project(started, project_path)
+
+
 def backup_project(path: Path) -> Path:
     """Copy the project to Backup/<name> (before MCP edit HHhMMmSS).flp."""
     folder = path.parent / "Backup"
