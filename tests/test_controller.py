@@ -125,7 +125,8 @@ def test_snapshot_assembles_all_sections(fl):
                 "index": 1,
                 "name": "Pattern 1",
                 "color": 0,
-                "length_beats": 16,
+                "length_steps": 16,
+                "length_beats": 4.0,
                 "is_default": False,
                 "is_selected": False,
             }

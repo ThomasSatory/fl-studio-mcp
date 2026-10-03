@@ -330,10 +330,14 @@ def _add_controller_context(conn, context: dict) -> None:
         if "current_pattern" not in context:
             result = conn.send_command("patterns.getCurrent")
             if result.get("success") and result.get("index") is not None:
+                from fl_studio_mcp.tools.patterns import with_lengths  # noqa: PLC0415
+
+                lengths = with_lengths({k: result[k] for k in ("length_beats", "length_steps")
+                                        if k in result})
                 context["current_pattern"] = {
                     "index": result.get("index"),
                     "name": result.get("name"),
-                    "length_beats": result.get("length_beats"),
+                    "length_beats": lengths.get("length_beats"),
                 }
         if "selected_channel" not in context:
             result = conn.send_command("channels.getSelected")

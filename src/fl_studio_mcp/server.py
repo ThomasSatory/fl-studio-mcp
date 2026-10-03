@@ -174,6 +174,12 @@ def fl_connection_status(reconnect: bool = False) -> dict:
             if version < project_files.SAVE_CONTROLLER_VERSION:
                 out["controller_warning"] = project_files.OUTDATED_FOR_SAVING.format(
                     version=version)
+            elif version < project_files.LATEST_CONTROLLER_VERSION:
+                out["controller_note"] = (
+                    f"The controller script is at version {version}; version "
+                    f"{project_files.LATEST_CONTROLLER_VERSION} is needed for step shift in "
+                    "fl_write_steps. Copy fl_controller/device_FLStudioMCP.py into FL "
+                    "Studio again (setup.sh) and restart FL Studio.")
         except Exception as e:  # noqa: BLE001 - a status report must not fail
             out["controller_warning"] = str(e)
     return out

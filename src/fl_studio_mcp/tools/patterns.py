@@ -17,6 +17,26 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 
 
+# FL's patterns.getPatternLength counts step-sequencer steps (16ths), not beats
+# as its API docs say: verified live, a 2-bar pattern reports 32.
+STEPS_PER_BEAT = 4
+
+
+def with_lengths(pattern: dict) -> dict:
+    """Give a controller pattern entry both length_steps and length_beats.
+
+    Controller scripts before version 5 passed FL's step count on as
+    "length_beats" (4x too big); version 5 sends both.
+    """
+    if not isinstance(pattern, dict) or "length_steps" in pattern:
+        return pattern
+    steps = pattern.get("length_beats")
+    if isinstance(steps, (int, float)) and not isinstance(steps, bool):
+        pattern["length_steps"] = steps
+        pattern["length_beats"] = steps / STEPS_PER_BEAT
+    return pattern
+
+
 def _index_error(index: object) -> str | None:
     """Reject pattern indices FL Studio would silently turn into new patterns.
 
@@ -40,11 +60,16 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         are listed. Set include_default=True to list all 999 potential slots
         (slow, rarely useful).
 
-        Returns each pattern's index (1-based), name, color, length in beats
-        and selection state, plus the currently active pattern.
-        `current` is the index of the active pattern.
+        Returns each pattern's index (1-based), name, color, length
+        (length_beats = quarter notes, length_steps = 16th steps; 16 beats =
+        4 bars of 4/4) and selection state, plus the currently active pattern.
+        `current` is the index of the active pattern (the one the channel rack
+        shows); `is_selected` only means highlighted in FL's pattern picker.
         """
-        return run(get_connection(), "patterns.getAll", {"include_default": include_default})
+        result = run(get_connection(), "patterns.getAll", {"include_default": include_default})
+        for pattern in result.get("patterns", []):
+            with_lengths(pattern)
+        return result
 
     @mcp.tool(annotations=IDEMPOTENT)
     def fl_select_pattern(index: int) -> str:
@@ -59,11 +84,13 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         return f"Selected pattern {result.get('selected')} ({result.get('name')})"
 
     @mcp.tool(annotations=ACTION)
-    def fl_new_pattern(name: str | None = None) -> str:
+    def fl_new_pattern(name: str | None = None) -> dict:
         """Create a pattern: switch to the next empty one and optionally name it.
 
         FL patterns are virtual; this finds and activates the next unused
         pattern, which is the practical equivalent of creating one.
+
+        Returns {"pattern": its number, "name", "message"}.
 
         Args:
             name: name for the new pattern (e.g. "Drums verse")
@@ -73,7 +100,9 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         """
         params = {"name": name} if name else {}
         result = run(get_connection(), "patterns.newEmpty", params)
-        return f"Switched to empty pattern {result.get('selected')} ({result.get('name')})"
+        return {"pattern": result.get("selected"), "name": result.get("name"),
+                "message": f"Switched to empty pattern {result.get('selected')} "
+                           f"({result.get('name')})"}
 
     @mcp.tool(annotations=ACTION)
     def fl_clone_pattern(index: int | None = None) -> str:

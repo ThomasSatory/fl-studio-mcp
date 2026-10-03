@@ -61,7 +61,7 @@ TRIGGER_NOTE = 127
 
 # Bumped whenever an action is added or changes; the MCP server reads it via
 # system.info to detect an outdated script installed in FL Studio.
-CONTROLLER_VERSION = 4
+CONTROLLER_VERSION = 5
 
 # Project loads seen since the script started (OnProjectLoad), so the server
 # can wait for a reload it requested. The instance id changes when FL reloads
@@ -302,6 +302,11 @@ def _pattern_index_error(patterns, index: int) -> dict | None:
     return None
 
 
+# patterns.getPatternLength counts step-sequencer steps (16ths), not beats as
+# the API docs say: verified live, a 2-bar pattern reports 32.
+STEPS_PER_BEAT = 4
+
+
 def handle_patterns_get_count(params: dict) -> dict:
     try:
         patterns = _patterns_mod()
@@ -330,7 +335,8 @@ def handle_patterns_get_all(params: dict) -> dict:
                 "index": i,
                 "name": patterns.getPatternName(i),
                 "color": patterns.getPatternColor(i),
-                "length_beats": patterns.getPatternLength(i),
+                "length_steps": patterns.getPatternLength(i),
+                "length_beats": patterns.getPatternLength(i) / STEPS_PER_BEAT,
                 "is_default": is_default,
                 "is_selected": patterns.isPatternSelected(i),
             })
@@ -348,7 +354,8 @@ def handle_patterns_get_current(params: dict) -> dict:
         return {
             "index": i,
             "name": patterns.getPatternName(i),
-            "length_beats": patterns.getPatternLength(i),
+            "length_steps": patterns.getPatternLength(i),
+            "length_beats": patterns.getPatternLength(i) / STEPS_PER_BEAT,
         }
     except ImportError:
         return {"error": "patterns module not available (requires FL Studio 2024+)"}
@@ -942,8 +949,10 @@ def _automation_error(track: int, wanted, reported: float) -> dict:
         "error": "Mixer track %d's volume did not follow: set to %s, FL Studio reports %.3f. "
                  "The fader is probably automated (an automation clip, or a controller "
                  "linked to it, drives the value; FL keeps an automation clip's last value "
-                 "after the clip ends). Edit or delete the automation clip "
-                 "(fl_edit_arrangement), or unlink the controller, then retry."
+                 "after the clip ends, and after a reload the saved value until the "
+                 "playhead enters a clip). Change the clip with fl_edit_arrangement "
+                 "(set_automation, or delete it) instead of retrying this; if it is already "
+                 "fixed, move the playhead into it (fl_set_song_position)."
                  % (track, wanted, reported),
         "automated": True,
     }
@@ -1862,6 +1871,59 @@ def _select_pattern_param(params: dict):
     return int(pattern), None
 
 
+def _step_problems(channel: int, step: int, s: dict, step_ticks: int) -> list:
+    """What differs between step `s` as asked and as FL reads it back ([] if nothing)."""
+    if not channels.getGridBit(channel, step, True):
+        return ["step is off"]
+    problems = []
+    if channels.getCurrentStepParam(channel, step, 0, True) < 0:
+        problems.append("FL dropped the step's note data (its parameters read -1)")
+    for key, param_id in _STEP_PARAMS.items():
+        if key not in s:
+            continue
+        got = channels.getCurrentStepParam(channel, step, param_id, True)
+        want = int(s[key])
+        # FL reads the shift back as the step's absolute tick position.
+        ok = got in (want, step * step_ticks + want) if key == "shift" else got == want
+        if not ok:
+            problems.append("%s %s != %s" % (key, got, want))
+    return problems
+
+
+def _write_step(channel: int, pattern: int, step: int, s: dict, step_ticks: int) -> list:
+    """Switch step on and set its parameters; returns the problems read back.
+
+    The shift goes last. FL reports it as an absolute tick position, and a
+    relative value (as the API docs describe it) left the step without note
+    data live: the absolute form is tried first, then (on a freshly rewritten
+    step) the relative one; when neither reads back, the step is rewritten
+    without shift and the problem is reported.
+    """
+    plain = {k: v for k, v in s.items() if k != "shift"}
+
+    def write_plain(fresh=True):
+        if fresh:
+            channels.setGridBit(channel, step, 0, True)  # a fresh step: FL's defaults
+        channels.setGridBit(channel, step, 1, True)
+        for key, param_id in _STEP_PARAMS.items():
+            if key in plain:
+                channels.setStepParameterByIndex(channel, pattern, step, param_id,
+                                                 int(s[key]), True)
+
+    write_plain(fresh=False)
+    if "shift" not in s:
+        return _step_problems(channel, step, s, step_ticks)
+    shift = int(s["shift"])
+    for value in (step * step_ticks + shift, shift):
+        channels.setStepParameterByIndex(channel, pattern, step, _STEP_PARAMS["shift"],
+                                         value, True)
+        if not _step_problems(channel, step, s, step_ticks):
+            return []
+        write_plain()
+    return ["FL Studio did not take shift %d ticks; the step was rewritten without it"
+            % shift] + _step_problems(channel, step, plain, step_ticks)
+
+
 def handle_channels_set_steps(params: dict) -> dict:
     """Write steps with pitch/velocity/pan... into a channel of any pattern.
 
@@ -1877,31 +1939,20 @@ def handle_channels_set_steps(params: dict) -> dict:
         return {"error": error}
     steps = params.get("steps") or []
     if params.get("clear", True):
-        pattern_steps = int(round(_patterns_mod().getPatternLength(pattern) * 4))
+        pattern_steps = int(_patterns_mod().getPatternLength(pattern))
         clear_to = max([pattern_steps] + [int(s["step"]) + 1 for s in steps])
         for i in range(clear_to):
             channels.setGridBit(channel, i, 0, True)
+    step_ticks = _ppq() // 4
+    mismatched = []
     for s in steps:
-        step = int(s["step"])
-        channels.setGridBit(channel, step, 1, True)
-        for key, param_id in _STEP_PARAMS.items():
-            if key in s:
-                channels.setStepParameterByIndex(channel, pattern, step, param_id,
-                                                 int(s[key]), True)
+        problems = _write_step(channel, pattern, int(s["step"]), s, step_ticks)
+        if problems:
+            mismatched.append({"step": int(s["step"]), "problem": "; ".join(problems)})
     try:
         channels.updateGraphEditor()
     except Exception:
         pass
-    mismatched = []
-    for s in steps:
-        step = int(s["step"])
-        if not channels.getGridBit(channel, step, True):
-            mismatched.append({"step": step, "problem": "step is off"})
-            continue
-        if "pitch" in s:
-            got = channels.getCurrentStepParam(channel, step, 0, True)
-            if got != int(s["pitch"]):
-                mismatched.append({"step": step, "problem": "pitch %s != %s" % (got, s["pitch"])})
     return {
         "channel": channel,
         "channel_name": channels.getChannelName(channel, True),
@@ -1921,7 +1972,7 @@ def handle_channels_get_steps(params: dict) -> dict:
     if error:
         return {"error": error}
     count = int(params.get("steps", 0)) or max(
-        16, int(round(_patterns_mod().getPatternLength(pattern) * 4)))
+        16, int(_patterns_mod().getPatternLength(pattern)))
     step_ticks = _ppq() // 4
     active = []
     for step in range(count):

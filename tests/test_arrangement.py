@@ -15,8 +15,9 @@ from tests.fakes import RecordingMCP
 from tests.flp_builder import build_project
 
 TIMELINE = arr_tools.Timeline(96, 384)
-PATTERNS = {1: {"index": 1, "name": "Intro", "length_beats": 8},
-            2: {"index": 2, "name": "Hook", "length_beats": 16}}
+# As controller v5 reports them: FL's step count, and beats (2 and 4 bars).
+PATTERNS = {1: {"index": 1, "name": "Intro", "length_steps": 32, "length_beats": 8},
+            2: {"index": 2, "name": "Hook", "length_steps": 64, "length_beats": 16}}
 
 
 def apply(clips, *ops):
@@ -208,3 +209,86 @@ def test_reload_is_detected_by_the_playhead_leaving_the_sentinel(monkeypatch):
     info = project_files.wait_for_reload(Conn(), {"instance_id": "a", "load_count": 0},
                                          sentinel="1:01:07", timeout=5)
     assert info["instance_id"] == "a"
+
+
+def _saves(fake):
+    return sum(1 for call in fake.calls if call[0] == "transport.save")
+
+
+def test_pattern_lengths_from_an_old_controller_are_steps(fl, monkeypatch):
+    # Controllers before v5 pass FL's step count as "length_beats".
+    tools, fake, path = fl
+    old = [{"index": 1, "name": "Intro", "length_beats": 32}]
+    original = fake.send_command
+    monkeypatch.setattr(fake, "send_command", lambda a, p=None, t=2.0: (
+        {"success": True, "patterns": [dict(x) for x in old]} if a == "patterns.getAll"
+        else original(a, p, t)))
+    result = tools["fl_edit_arrangement"](
+        [{"op": "place", "pattern": "Intro", "track": 7, "bar": 81, "repeat": 2}],
+        dry_run=True, project_path=str(path))
+    assert "2 bar(s) x2 every 2 bar(s)" in result["log"][0]
+    clips = [c for t in result["arrangement"]["tracks"] if t["track"] == 7 for c in t["clips"]]
+    assert [(c["bar"], c["length_bars"]) for c in clips] == [(81.0, 2.0), (83.0, 2.0)]
+
+
+def test_place_refuses_patterns_that_do_not_exist_before_saving(fl):
+    tools, fake, path = fl
+    for ref in (99, 3):
+        with pytest.raises(ToolError, match=f"no pattern {ref} .*Patterns: 1='Intro'"):
+            tools["fl_edit_arrangement"](
+                [{"op": "place", "pattern": ref, "track": 3, "bar": 20, "length_bars": 2}],
+                project_path=str(path))
+    assert _saves(fake) == 0
+
+
+def test_an_invalid_batch_is_refused_before_the_project_is_saved(fl):
+    tools, fake, path = fl
+    before = path.read_bytes()
+    bad_batches = [
+        [{"op": "clear"}, {"op": "copy", "from_bar": 9, "to_bar": 5, "to": 1}],
+        [{"op": "automation", "target": {"type": "tempo"}, "track": 5,
+          "points": [{"bar": 1, "value": 2}]}],
+        [{"op": "set_automation", "clip": None, "points": []}],
+        [{"op": "place", "pattern": "Hook", "track": 0, "bar": 1}],
+    ]
+    for batch in bad_batches:
+        with pytest.raises(ToolError, match="operation"):
+            tools["fl_edit_arrangement"](batch, project_path=str(path))
+    assert _saves(fake) == 0 and path.read_bytes() == before
+
+
+def test_an_edit_that_changes_nothing_writes_nothing(fl):
+    tools, fake, path = fl
+    before = path.read_bytes()
+    result = tools["fl_edit_arrangement"](
+        [{"op": "delete", "track": 3, "from_bar": 13, "to_bar": 13}], project_path=str(path))
+    assert result["changed"] is False and "deleted 0" in result["log"][0]
+    assert path.read_bytes() == before
+    assert not any(call[0] == "open" for call in fake.calls)
+    assert not (path.parent / "Backup").exists()
+
+
+def test_the_callers_operations_are_left_untouched(fl):
+    tools, _, path = fl
+    ops = [{"op": "automation", "target": {"type": "tempo"}, "track": 5,
+            "points": [{"bar": 1, "value": 0.2}, {"bar": 5, "value": 0.6}]}]
+    snapshot = repr(ops)
+    tools["fl_edit_arrangement"](ops, project_path=str(path))
+    assert repr(ops) == snapshot
+
+
+def test_automation_edits_move_the_playhead_through_the_clip(fl):
+    tools, fake, path = fl
+    tools["fl_edit_arrangement"](
+        [{"op": "automation", "target": {"type": "tempo"}, "track": 5, "name": "Fade",
+          "points": [{"bar": 3, "value": 0.2}, {"bar": 5, "value": 0.6}]}],
+        project_path=str(path))
+    fake.calls.clear()
+    result = tools["fl_edit_arrangement"](
+        [{"op": "set_automation", "clip": "Fade",
+          "points": [{"beat": 0, "value": 0.8}, {"beat": 8, "value": 0.8}]}],
+        project_path=str(path))
+    opened = fake.calls.index(("open", str(path)))
+    moves = [p["ticks"] for a, p in fake.calls[opened:] if a == "transport.setPosition"]
+    assert moves == [2 * 384, 0]
+    assert "bar 3" in result["automation_note"]

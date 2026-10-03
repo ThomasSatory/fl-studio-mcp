@@ -230,6 +230,37 @@ def _master_volume(conn: Any) -> float | None:
         return None
 
 
+def _master_automation(conn: Any, project: Project) -> list[str] | None:
+    """Names of the automation clips that drive the Master fader (None if unknown)."""
+    try:
+        answer = run(conn, "automation.resolve",
+                     {"targets": [{"type": "mixer_volume", "track": 0}]})
+        rec_id = int(answer["targets"][0]["rec_id"])
+        return [a.name for a in flp.automation_clips(project) if a.target == rec_id]
+    except (ToolError, FLPError, KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def master_silent_warning(master: float, clips: list[str] | None) -> str:
+    """The silent-Master warning, pointing at what actually fixes it."""
+    text = f"Master fader is at {master:.2f}: the render is (nearly) silent. "
+    fix_clip = (
+        "FL holds an automation clip's last value after the clip ends, so fl_set_track_volume "
+        "cannot set Master while the clip exists: fix the clip with fl_edit_arrangement "
+        "(set_automation so it ends at the normal level, 0.8 = 0 dB, or delete it); the "
+        "edit then passes the playhead over the clip so FL applies it. If the clip is "
+        "already fixed, move the playhead into it with fl_set_song_position, then render "
+        "again.")
+    if clips:
+        names = ", ".join(repr(name) for name in clips)
+        return text + f"An automation clip drives Master ({names}). " + fix_clip
+    if clips == []:
+        return text + "No automation clip drives it: set it back with " \
+            "fl_set_track_volume(track=0, volume=0.8)."
+    return text + ("If an automation clip drives Master: " + fix_clip + " Otherwise set it "
+                   "back with fl_set_track_volume(track=0, volume=0.8).")
+
+
 def _is_open_project(path: Path, save: bool) -> bool:
     """True when `path` is the project open in FL (just saved, or the one located)."""
     if save:
@@ -367,10 +398,9 @@ def register_render_tools(mcp: FastMCP) -> None:
         master = (await _in_thread(_master_volume, conn)
                   if _is_open_project(path, save) else None)
         if master is not None and master <= MASTER_SILENT:
-            analysis.setdefault("warnings", []).insert(0, (
-                f"Master fader is at {master:.2f}: the render is (nearly) silent; an "
-                "automation clip that fades Master to 0 leaves it there after it ends. "
-                "Set it back with fl_set_track_volume(track=0, volume=0.8)."))
+            clips = (await _in_thread(_master_automation, conn, project)
+                     if project is not None else None)
+            analysis.setdefault("warnings", []).insert(0, master_silent_warning(master, clips))
         await _progress(ctx, 1, total, "Mix rendered and analysed"
                         + (f"; rendering {len(targets)} stem(s)" if targets else ""))
 

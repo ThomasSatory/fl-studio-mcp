@@ -129,8 +129,127 @@ def test_step_normalization():
         channel_tools._normalize_step(0, {"step": 600}, 96)
 
 
+def test_step_extremes_stay_in_fl_ranges():
+    step = channel_tools._normalize_step(0, {"step": 0, "pan": 1.0, "shift": 0.999}, 96)
+    assert step["pan"] == 127 and step["shift"] == 23  # below one step (24 ticks)
+
+
+class StepConn:
+    def __init__(self, version=5, active=None, mismatched=None):
+        self.version, self.active, self.mismatched = version, active or [], mismatched or []
+        self.sent = []
+
+    def send_command(self, action, params=None, timeout=2.0):
+        self.sent.append(action)
+        if action == "system.info":
+            return {"success": True, "controller_version": self.version, "ppq": 96}
+        if action == "channels.getSteps":
+            return {"success": True, "active": [dict(a) for a in self.active]}
+        return {"success": True, "mismatched": self.mismatched}
+
+
+def _step_tools(monkeypatch, conn):
+    from tests.fakes import RecordingMCP
+
+    monkeypatch.setattr("fl_studio_mcp.utils.connection.get_connection", lambda: conn)
+    mcp = RecordingMCP()
+    channel_tools.register_channel_tools(mcp)
+    return mcp.tools
+
+
+def test_shift_needs_controller_version_5(monkeypatch):
+    conn = StepConn(version=4)
+    tools = _step_tools(monkeypatch, conn)
+    with pytest.raises(ToolError, match="shift"):
+        tools["fl_write_steps"](channel=1, steps=[{"step": 2, "shift": 0.5}])
+    assert "channels.setSteps" not in conn.sent
+    tools["fl_write_steps"](channel=1, steps=[{"step": 2, "velocity": 80}])  # fine on v4
+    assert "channels.setSteps" in conn.sent
+
+
+def test_write_steps_fails_loudly_on_any_mismatch(monkeypatch):
+    conn = StepConn(mismatched=[{"step": 2, "problem": "velocity -1 != 80"}])
+    tools = _step_tools(monkeypatch, conn)
+    with pytest.raises(ToolError, match="velocity -1 != 80"):
+        tools["fl_write_steps"](channel=1, steps=[{"step": 2, "velocity": 80}])
+
+
+def test_get_steps_uses_the_write_scales_and_flags_broken_steps(monkeypatch):
+    conn = StepConn(active=[
+        {"step": 0, "pitch": 60, "velocity": 100, "pan": 32, "shift": 12},
+        {"step": 2, "pitch": -1, "velocity": -1, "pan": -1, "shift": -1}])
+    result = _step_tools(monkeypatch, conn)["fl_get_steps"](channel=1)
+    first, broken = result["active"]
+    assert (first["pan"], first["pan_raw"], first["shift"], first["shift_ticks"]) == (
+        -0.5, 32, 0.5, 12)
+    assert first["note"] == "C4" and broken["broken"] is True
+
+
 def test_parse_color():
     assert parse_color("#FF8000") == [255, 128, 0]
     assert parse_color([1, 2, 3]) == [1, 2, 3]
     with pytest.raises(ToolError):
         parse_color("red")
+
+
+def test_volume_on_an_automated_fader_points_at_the_clip_not_a_retry(monkeypatch):
+    from fl_studio_mcp.tools import mixer as mixer_tools
+    from tests.fakes import RecordingMCP
+
+    class Conn:
+        def send_command(self, action, params=None, timeout=2.0):
+            return {"success": False, "automated": True, "error": (
+                "Mixer track 0's volume did not follow: set to 0.800, FL Studio reports "
+                "0.000. The fader is probably automated (...). Edit or delete the "
+                "automation clip (fl_edit_arrangement), or unlink the controller, then retry.")}
+
+    monkeypatch.setattr("fl_studio_mcp.utils.connection.get_connection", lambda: Conn())
+    mcp = RecordingMCP()
+    mixer_tools.register_mixer_tools(mcp)
+    with pytest.raises(ToolError) as e:
+        mcp.tools["fl_set_track_volume"](track=0, volume=0.8)
+    text = str(e.value)
+    assert text.startswith("Mixer track 0's volume did not follow")
+    assert "do not retry fl_set_track_volume" in text and "fl_set_song_position" in text
+    assert "then retry" not in text
+
+
+def _tools_with(monkeypatch, conn, register):
+    from tests.fakes import RecordingMCP
+
+    monkeypatch.setattr("fl_studio_mcp.utils.connection.get_connection", lambda: conn)
+    mcp = RecordingMCP()
+    register(mcp)
+    return mcp.tools
+
+
+class AnswerConn:
+    def __init__(self, answers):
+        self.answers = answers
+
+    def send_command(self, action, params=None, timeout=2.0):
+        answer = self.answers[action]
+        return {"success": True, **(answer(params) if callable(answer) else answer)}
+
+
+def test_song_position_past_the_end_says_so(monkeypatch):
+    from fl_studio_mcp.tools.transport import register_transport_tools
+
+    conn = AnswerConn({"transport.getLength": {"ppq": 96},
+                       "transport.setPosition": {"ticks": 30719, "position": "80:16:23"}})
+    tools = _tools_with(monkeypatch, conn, register_transport_tools)
+    assert "past the end" in tools["fl_set_song_position"](bar=500)["note"]
+    conn.answers["transport.setPosition"] = lambda p: {"ticks": p["ticks"], "position": "9:01:00"}
+    assert "note" not in tools["fl_set_song_position"](bar=9)
+
+
+def test_list_patterns_reports_beats_and_steps_from_an_old_controller(monkeypatch):
+    from fl_studio_mcp.tools.patterns import register_pattern_tools
+
+    conn = AnswerConn({"patterns.getAll": {"current": 2, "patterns": [
+        {"index": 2, "name": "Hook", "length_beats": 32}]},
+        "patterns.newEmpty": {"selected": 6, "name": "QA beat"}})
+    tools = _tools_with(monkeypatch, conn, register_pattern_tools)
+    (hook,) = tools["fl_list_patterns"]()["patterns"]
+    assert (hook["length_beats"], hook["length_steps"]) == (8, 32)  # 2 bars of 4/4
+    assert tools["fl_new_pattern"]("QA beat")["pattern"] == 6

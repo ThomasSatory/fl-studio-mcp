@@ -95,9 +95,9 @@ def test_save_outside_a_midi_event_is_refused(fl):
     modules["transport"].globalTransport.assert_not_called()
 
 
-def test_controller_version_is_4(fl):
+def test_controller_version_is_5(fl):
     controller, _ = fl
-    assert controller.CONTROLLER_VERSION == 4
+    assert controller.CONTROLLER_VERSION == 5
 
 
 def test_track_volume_in_db_bisects_the_fader(fl):
@@ -131,6 +131,84 @@ def test_set_steps_writes_pitch_in_the_given_pattern(fl):
     assert result["mismatched"] == []
     assert bits[0] == 1 and bits[6] == 1 and bits[3] == 0
     assert pitches[(0, 0)] == 41 and pitches[(0, 1)] == 120
+
+
+def _step_fake(modules, ppq=96, broken_shift=None):
+    """Step sequencer stand-in. broken_shift(step, value) -> True drops the step's data."""
+    channels = modules["channels"]
+    modules["general"].getRecPPQ.return_value = ppq
+    bits, params = {}, {}
+
+    def set_bit(ch, pos, val, g):
+        bits[pos] = val
+        if val:
+            for key in [k for k in params if k[0] == pos]:
+                del params[key]  # a fresh step has default values
+
+    def set_param(ch, pat, step, param, value, g):
+        if param == 7 and broken_shift and broken_shift(step, value):
+            params[(step, "broken")] = True
+            return
+        params[(step, param)] = value
+
+    def get_param(ch, step, param, g):
+        if params.get((step, "broken")):
+            return -1
+        default = step * ppq // 4 if param == 7 else 60
+        return params.get((step, param), default)
+
+    channels.setGridBit.side_effect = set_bit
+    channels.getGridBit.side_effect = lambda ch, pos, g: bits.get(pos, 0)
+    channels.setStepParameterByIndex.side_effect = set_param
+    channels.getCurrentStepParam.side_effect = get_param
+    return bits, params
+
+
+def test_set_steps_writes_the_shift_as_an_absolute_position(fl):
+    controller, modules = fl
+    _, params = _step_fake(modules)
+    result = controller.dispatch_command("channels.setSteps", {
+        "channel": 1, "steps": [{"step": 2, "velocity": 80, "shift": 12}]})
+    assert result["mismatched"] == []
+    assert params[(2, 7)] == 2 * 24 + 12 and params[(2, 1)] == 80
+
+
+def test_set_steps_falls_back_to_a_relative_shift(fl):
+    controller, modules = fl
+    _, params = _step_fake(modules, broken_shift=lambda step, value: value >= 24)
+    result = controller.dispatch_command("channels.setSteps", {
+        "channel": 1, "steps": [{"step": 2, "velocity": 80, "shift": 12}]})
+    assert result["mismatched"] == [] and params[(2, 7)] == 12
+
+
+def test_set_steps_reports_a_shift_fl_breaks_and_repairs_the_step(fl):
+    controller, modules = fl
+    _, params = _step_fake(modules, broken_shift=lambda step, value: True)
+    result = controller.dispatch_command("channels.setSteps", {
+        "channel": 1, "clear": False,
+        "steps": [{"step": 2, "pitch": 41, "velocity": 80, "shift": 12}]})
+    (problem,) = result["mismatched"]
+    assert problem["step"] == 2 and "shift" in problem["problem"]
+    assert "broken" not in {k[1] for k in params}  # rewritten without the shift
+    assert params[(2, 0)] == 41 and params[(2, 1)] == 80
+
+
+def test_set_steps_checks_every_written_parameter(fl):
+    controller, modules = fl
+    channels = modules["channels"]
+    _step_fake(modules)
+    channels.setStepParameterByIndex.side_effect = None  # FL ignores every write
+    result = controller.dispatch_command("channels.setSteps", {
+        "channel": 1, "steps": [{"step": 0, "velocity": 80, "pan": 32}]})
+    assert "velocity 60 != 80" in result["mismatched"][0]["problem"]
+    assert "pan" in result["mismatched"][0]["problem"]
+
+
+def test_pattern_lengths_are_reported_in_steps_and_beats(fl):
+    controller, modules = fl
+    modules["patterns"].getPatternLength.return_value = 32  # a 2-bar pattern
+    (pattern,) = controller.dispatch_command("patterns.getAll", {})["patterns"]
+    assert (pattern["length_steps"], pattern["length_beats"]) == (32, 8)
 
 
 def test_set_route_with_level(fl):

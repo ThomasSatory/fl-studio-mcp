@@ -30,6 +30,9 @@ MIN_CONTROLLER_VERSION = 3
 # PME flags, and FL then often writes nothing and crashes seconds later. Reads
 # and live edits work with version 3, so only saving is gated on 4.
 SAVE_CONTROLLER_VERSION = 4
+# The version of fl_controller/device_FLStudioMCP.py in this repository. Only
+# step shift needs 5 (see tools/channels.py); everything else works with 4.
+LATEST_CONTROLLER_VERSION = 5
 
 OUTDATED_FOR_SAVING = (
     "The FLStudioMCP controller script installed in FL Studio (version {version}) is too "

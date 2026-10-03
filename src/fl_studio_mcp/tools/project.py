@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fl_studio_mcp.tools.annotations import READ_ONLY
+from fl_studio_mcp.tools.patterns import with_lengths
 from fl_studio_mcp.utils.errors import run
 
 if TYPE_CHECKING:
@@ -33,4 +34,8 @@ def register_project_tools(mcp: FastMCP) -> None:
         valid. The piano roll is not included: use fl_get_pr_context.
         """
         result = run(get_connection(), "project.snapshot", timeout=SNAPSHOT_TIMEOUT)
+        patterns = result.get("patterns")
+        if isinstance(patterns, dict):
+            for item in patterns.get("items") or []:
+                with_lengths(item)
         return {key: result[key] for key in SECTIONS if key in result}

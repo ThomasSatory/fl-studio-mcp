@@ -530,11 +530,31 @@ Studio's command-line renderer and analyse the result (whole song, sections
 and per-track stems). It needs numpy (installed with the package). The
 server instructions no longer tell the assistant to ask you for an export.
 
-The controller script is at version 4: copy
+The controller script is at version 5: copy
 `fl_controller/device_FLStudioMCP.py` into FL Studio again (setup.sh) and
-restart FL Studio. It fixes FL Studio crashing (or saving nothing) when a tool
-saves the project; the server refuses to save through an older script, and
-`fl_connection_status` warns about it.
+restart FL Studio. Version 4 fixed FL Studio crashing (or saving nothing) when
+a tool saves the project; the server refuses to save through an older script,
+and `fl_connection_status` warns about it. Version 5 is only required for
+`shift` in `fl_write_steps` (it now writes, reads back and checks every step
+parameter); it also reports pattern lengths in both steps and beats.
+
+Saving is more careful: a tool only takes the project file once FL has really
+written it (the file changed after the request and FL's `.flp~` temporary file
+is gone), does not save when FL has nothing unsaved and the file is current
+(`fl_save_project` then answers `"saved": false`), waits 3 s after a reload it
+caused, and says so when FL Studio crashes or stops answering during a save.
+
+`length_beats` from `fl_list_patterns` is now in beats (it was FL's 16th-step
+count, 4x too big, so `place` without `length_bars` placed 4x too long);
+`length_steps` holds the step count. `fl_edit_arrangement` refuses pattern
+numbers that do not exist, checks a whole batch before saving, writes nothing
+when an edit changes nothing (`"changed": false`), no longer modifies the
+operations passed in, and after an automation edit passes the playhead over
+the edited clips so FL applies them at once. `fl_get_steps` returns `pan`
+(-1..1) and `shift` (fraction of a step) on `fl_write_steps`' scales, raw
+values in `pan_raw` and `shift_ticks`. `fl_new_pattern` returns
+`{"pattern", "name", "message"}`. `fl_analyze_audio` measures pitch on the
+sustain (808s read a semitone sharp from their attack).
 
 `fl_get_song_length` returns `length_bars` and `last_position` (`bar`, `step`,
 `tick`: FL's B:S:T position of the last tick) instead of `bars`, `steps` and

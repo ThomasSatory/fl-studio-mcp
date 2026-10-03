@@ -11,6 +11,7 @@ half-way through bar 9); tracks are 1-based like the playlist.
 
 from __future__ import annotations
 
+import copy
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.annotations import DESTRUCTIVE, IDEMPOTENT
+from fl_studio_mcp.tools.patterns import with_lengths
 from fl_studio_mcp.utils import project_files
 from fl_studio_mcp.utils.errors import run
 from fl_studio_mcp.utils.flp import (
@@ -81,13 +83,24 @@ class Timeline:
         return round(ticks / self.bar_ticks, 4)
 
 
-def resolve_pattern(ref: Any, patterns: dict[int, dict]) -> int:
-    """Pattern number from a number or a (case-insensitive) name."""
+def _known_patterns(patterns: dict[int, dict]) -> str:
+    return ", ".join(f"{n}={p.get('name')!r}" for n, p in sorted(patterns.items())) or "none"
+
+
+def resolve_pattern(ref: Any, patterns: dict[int, dict], must_exist: bool = True) -> int:
+    """Pattern number from a number or a (case-insensitive) name.
+
+    A number must be one of `patterns` (FL's non-empty patterns) unless
+    must_exist is False (a delete filter may name a pattern that is gone).
+    """
     if isinstance(ref, bool):
         raise ToolError(f"pattern must be a number or a name, got {ref!r}")
     if isinstance(ref, int):
         if ref < 1:
             raise ToolError(f"pattern numbers start at 1, got {ref}")
+        if must_exist and ref not in patterns:
+            raise ToolError(f"no pattern {ref} (it does not exist or is empty). "
+                            f"Patterns: {_known_patterns(patterns)}")
         return ref
     if isinstance(ref, str):
         wanted = ref.strip().lower()
@@ -96,8 +109,7 @@ def resolve_pattern(ref: Any, patterns: dict[int, dict]) -> int:
             return matches[0]
         if len(matches) > 1:
             raise ToolError(f"several patterns are named {ref!r}: {matches}; use the number")
-        known = ", ".join(f"{n}={p.get('name')!r}" for n, p in sorted(patterns.items()))
-        raise ToolError(f"no pattern named {ref!r}. Patterns: {known or 'none'}")
+        raise ToolError(f"no pattern named {ref!r}. Patterns: {_known_patterns(patterns)}")
     raise ToolError(f"pattern must be a number or a name, got {ref!r}")
 
 
@@ -141,6 +153,42 @@ def apply_operations(
             raise ToolError(f"operation {n} ({kind}): {e}") from e
         log.append(text)
     return result, log
+
+
+def validate_operations(operations: list, timeline: Timeline,
+                        patterns: dict[int, dict]) -> None:
+    """Check every operation's shape and references, before anything is saved.
+
+    Runs each clip operation on an empty arrangement and parses automation
+    points; what depends on the file (automation clip names) is checked later.
+    """
+    if not isinstance(operations, list) or not operations:
+        raise ToolError("operations must be a non-empty list")
+    for n, op in enumerate(operations):
+        if not isinstance(op, dict) or op.get("op") not in OPS:
+            raise ToolError(f"operation {n}: 'op' must be one of {', '.join(OPS)}; got {op!r}")
+        kind = op["op"]
+        trial = copy.deepcopy(op)
+        try:
+            if kind == "automation":
+                if not isinstance(op.get("target"), dict):
+                    raise ToolError("'target' must be an object, e.g. "
+                                    '{"type": "mixer_volume", "track": 3}')
+                _track(trial, required=True)
+                parse_points(trial, timeline, absolute=True)
+            elif kind == "set_automation":
+                ref = op.get("clip")
+                if isinstance(ref, bool) or not isinstance(ref, (int, str)):
+                    raise ToolError("'clip' must be an automation clip's channel or name")
+                parse_points(trial, timeline, absolute=False)
+            elif kind == "place":
+                _place([], trial, timeline, patterns)
+            elif kind == "delete":
+                _delete([], trial, timeline, patterns)
+            elif kind in ("copy", "move"):
+                _copy([], trial, timeline, move=kind == "move")
+        except ToolError as e:
+            raise ToolError(f"operation {n} ({kind}): {e}") from e
 
 
 def _place(clips, op, timeline, patterns):
@@ -234,7 +282,8 @@ def _delete(clips, op, timeline, patterns):
     track = _track(op)
     start_bar = _num(op, "from_bar", minimum=1)
     end_bar = _num(op, "to_bar", minimum=1)
-    pattern = resolve_pattern(op["pattern"], patterns) if op.get("pattern") is not None else None
+    pattern = (resolve_pattern(op["pattern"], patterns, must_exist=False)
+               if op.get("pattern") is not None else None)
     start = timeline.ticks(start_bar) if start_bar is not None else None
     end = timeline.ticks(end_bar) if end_bar is not None else None
     kept = [c for c in clips if not _in_range(c, start, end, track, pattern)]
@@ -372,6 +421,7 @@ def prepare_automation(project: Project, operations: list[dict], timeline: Timel
             raise ToolError(f"set_automation: no single automation clip {ref!r}. Clips: {known}")
         _, points = parse_points(op, timeline, absolute=False)
         set_automation_points(project, matches[0], points)
+        op["_channel"] = matches[0].channel
         op["_log"] = f"replaced the points of {matches[0].name!r} ({len(points)} points)"
 
 
@@ -402,7 +452,26 @@ def _commit(conn, path: Path, data: bytes, info: dict) -> dict:
 
 def _live_patterns(conn) -> dict[int, dict]:
     result = run(conn, "patterns.getAll", {"include_default": False})
-    return {int(p["index"]): p for p in result.get("patterns", [])}
+    return {int(p["index"]): with_lengths(dict(p)) for p in result.get("patterns", [])}
+
+
+def _apply_automation_now(conn, starts: list[int], timeline: Timeline) -> str | None:
+    """Move the playhead into the edited automation clips, then back to the start.
+
+    After a reload FL keeps the saved parameter value until the playhead
+    enters an automation clip (a fixed "fade out" left Master at 0 live).
+    Passing the playhead over each clip's start makes FL apply it now.
+    """
+    try:
+        for start in sorted(set(starts)):
+            run(conn, "transport.setPosition", {"ticks": start})
+        run(conn, "transport.setPosition", {"ticks": 0})
+    except ToolError:
+        return None
+    bars = ", ".join(f"{timeline.bar(t):g}" for t in sorted(set(starts)))
+    return (f"The playhead was moved to the edited automation clip(s) (bar {bars}) and back "
+            "to bar 1 so FL applies their values now. FL holds an automation clip's last "
+            "value after the clip ends.")
 
 
 def _load_checked(path: Path) -> tuple[Project, bytes]:
@@ -486,7 +555,7 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
         1-based. Operations run in order:
 
         - {"op": "place", "pattern": 2 or "Hook", "track": 1, "bar": 9,
-           "length_bars": 4 (default: the pattern's length),
+           "length_bars": 4 (default: the pattern's length; the pattern must exist),
            "repeat": 4, "every_bars": 4 (default: length_bars),
            "replace": true (default: remove clips it overlaps on that track)}
         - {"op": "delete", "track": 1 (default all), "from_bar": 9,
@@ -518,6 +587,10 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
         - {"op": "set_automation", "clip": channel index or name,
            "points": [{"beat": 0, "value": 0.1}, {"beat": 16, "value": 1}]}
            Replaces the points of an existing automation clip (beats from its start).
+        After automation edits the playhead is passed over the edited clips and
+        put back at bar 1, so FL applies their values right away (after a
+        reload FL otherwise keeps the saved value until the playhead enters a
+        clip). An edit that changes nothing writes nothing ("changed": false).
 
         Args:
             operations: the edits, applied in order
@@ -531,16 +604,21 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
         conn = get_connection()
         info = project_files.controller_info(conn)
         patterns = _live_patterns(conn)
+        operations = copy.deepcopy(operations)  # the caller's list is left as it was
+        ppq = int(info.get("ppq") or 96)
+        # Shapes and pattern references are checked before the project is saved.
+        validate_operations(operations, Timeline(ppq, 4 * ppq), patterns)
         path = project_files.current_project_file(conn, True, project_path)
-        project, _ = _load_checked(path)
+        project, original = _load_checked(path)
         try:
             arr = project.arrangement(arrangement)
         except FLPError as e:
             raise ToolError(str(e)) from e
         timeline = Timeline(project.ppq, project.bar_ticks)
         before = len(arr.clips)
-        if any(isinstance(op, dict) and op.get("op") in ("automation", "set_automation")
-               for op in operations):
+        automated = [op for op in operations
+                     if isinstance(op, dict) and op.get("op") in ("automation", "set_automation")]
+        if automated:
             def resolve(targets):
                 resolved = run(conn, "automation.resolve", {"targets": targets}).get("targets", [])
                 for target, out in zip(targets, resolved):
@@ -568,19 +646,37 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
         except FLPError as e:
             raise ToolError(str(e)) from e
         data = project.to_bytes()
+        if data == original:
+            return {"changed": False, "log": log, "clips_before": before,
+                    "clips_after": len(new_clips), "project": str(path),
+                    "note": "Nothing changed: no file written, no backup, FL not reloaded."}
         check = Project.parse(data).arrangement(arr.index)
         expected = sorted((c.position, c.track, c.pattern, c.channel, c.length) for c in new_clips)
         written = sorted((c.position, c.track, c.pattern, c.channel, c.length)
                          for c in check.clips)
         if expected != written:
             raise ToolError("internal check failed: the rewritten file does not hold the clips")
-        result = {"log": log, "clips_before": before, "clips_after": len(new_clips)}
+        result = {"changed": True, "log": log, "clips_before": before,
+                  "clips_after": len(new_clips)}
         result.update(_commit(conn, path, data, info))
+        if automated:
+            edited = {op["_channel"] for op in automated if "_channel" in op}
+            starts = [c.position for c in new_clips if c.channel in edited]
+            note = _apply_automation_now(conn, starts, timeline) if starts else None
+            if note:
+                result["automation_note"] = note
         try:
             length = run(conn, "transport.getLength")
             expected_end = max((c.end for c in new_clips), default=0)
-            result["song_length_bars"] = timeline.bars(length.get("ticks") or 0)
-            result["expected_length_bars"] = timeline.bars(expected_end)
+            song = round(timeline.bars(length.get("ticks") or 0), 2)
+            wanted = round(timeline.bars(expected_end), 2)
+            result["song_length_bars"] = song
+            result["expected_length_bars"] = wanted
+            if abs(song - wanted) > 0.05:
+                result["length_warning"] = (
+                    f"FL reports a {song:g}-bar song, the clips written end at bar "
+                    f"{wanted + 1:g}: FL may have resized clips to their pattern's length; "
+                    "check with fl_get_arrangement.")
         except ToolError:
             pass
         return result

@@ -106,7 +106,12 @@ def register_transport_tools(mcp: FastMCP) -> None:
                 raise ToolError("ticks must be >= 0")
             params = {"ticks": int(ticks)}
         result = run(conn, "transport.setPosition", params)
-        return {"position": result.get("position"), "ticks": result.get("ticks")}
+        out = {"position": result.get("position"), "ticks": result.get("ticks")}
+        got = result.get("ticks")
+        if "ticks" in params and isinstance(got, int) and got < params["ticks"]:
+            out["note"] = ("The position asked for is past the end of the song: FL put the "
+                           f"playhead at its end ({result.get('position')}).")
+        return out
 
     @mcp.tool(annotations=READ_ONLY)
     def fl_get_song_length() -> dict:

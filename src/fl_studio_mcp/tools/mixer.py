@@ -17,6 +17,18 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 
 
+AUTOMATED_FADER_HINT = (
+    "An automation clip (or a linked controller) probably drives this fader, so setting it "
+    "does not stick: do not retry fl_set_track_volume while the clip exists. FL holds an "
+    "automation clip's last value after the clip ends, and after a reload it keeps the "
+    "saved value until the playhead enters a clip. Change the clip instead with "
+    "fl_edit_arrangement: set_automation (e.g. end it at the normal level, 0.8 = 0 dB) or "
+    "delete it from its playlist track; fl_edit_arrangement then passes the playhead over "
+    "the clip so FL applies it. If the clip is already fixed, move the playhead into it "
+    "with fl_set_song_position."
+)
+
+
 def register_mixer_tools(mcp: FastMCP) -> None:
     """Register mixer control tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
@@ -88,13 +100,19 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             if not -100.0 <= volume_db <= 5.6:
                 raise ToolError("volume_db must be between -100 and +5.6 dB")
             params["db"] = volume_db
-        result = run(get_connection(), "mixer.setTrackVolume", params)
+        try:
+            result = run(get_connection(), "mixer.setTrackVolume", params)
+        except ToolError as e:
+            if "automated" not in str(e):
+                raise
+            first = str(e).split(". The fader")[0]
+            raise ToolError(f"{first}. {AUTOMATED_FADER_HINT}") from e
         new_vol = result.get("volume", 0)
         new_vol_db = result.get("volume_db", 0)
         if volume is not None and abs(new_vol - volume) > 0.01:
             raise ToolError(
-                f"Asked for {volume:.3f} but FL Studio reports {new_vol:.3f} on track {track}"
-                " (is the fader automated or linked to a controller?)"
+                f"Asked for {volume:.3f} but FL Studio reports {new_vol:.3f} on track "
+                f"{track}. {AUTOMATED_FADER_HINT}"
             )
         if volume_db is not None and abs(new_vol_db - volume_db) > 0.2:
             raise ToolError(f"Asked for {volume_db:g} dB but FL Studio reports {new_vol_db:.1f} dB")

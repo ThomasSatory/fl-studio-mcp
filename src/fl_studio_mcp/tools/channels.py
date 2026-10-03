@@ -325,7 +325,8 @@ def register_channel_tools(mcp: FastMCP) -> None:
         Args:
             channel: channel index (global)
             steps: [{"step": 0, "note": "C3" or "midi": 48, "velocity": 0-127,
-                     "pan": -1..1, "shift": 0-1 (fraction of a step, swing/nudge)}]
+                     "pan": -1..1, "shift": 0-1 (fraction of a step, swing/nudge;
+                     needs controller script version 5)}]
                    step 0 = first 16th of the pattern (16 steps per 4/4 bar).
                    Pitch defaults to 60 (C4 here; FL's UI calls it C5), which
                    plays a sample at its original pitch.
@@ -350,14 +351,20 @@ def register_channel_tools(mcp: FastMCP) -> None:
             seen.add(normalized[-1]["step"])
         if pattern is not None and (isinstance(pattern, bool) or pattern < 1):
             raise ToolError(f"pattern numbers start at 1, got {pattern!r}")
+        if (any("shift" in step for step in normalized)
+                and int(info.get("controller_version") or 0) < SHIFT_CONTROLLER_VERSION):
+            raise ToolError(project_files.OUTDATED_FOR_FEATURE.format(
+                action="safe step shift (older scripts leave a shifted step without its "
+                       "note; leave 'shift' out or update the script)"))
         params = {"channel": channel, "steps": normalized, "clear": clear}
         if pattern is not None:
             params["pattern"] = pattern
         result = run(conn, "channels.setSteps", params)
         if result.get("mismatched"):
             raise ToolError(
-                f"FL Studio did not apply {len(result['mismatched'])} step(s): "
-                f"{result['mismatched'][:5]}"
+                f"FL Studio did not apply {len(result['mismatched'])} step(s) as asked "
+                f"(read back after writing): {result['mismatched'][:5]}. Check them with "
+                "fl_get_steps."
             )
         return result
 
@@ -365,21 +372,46 @@ def register_channel_tools(mcp: FastMCP) -> None:
     def fl_get_steps(channel: int, pattern: int | None = None, steps: int = 0) -> dict:
         """Read a channel's active step-sequencer steps with pitch, velocity, pan and shift.
 
+        pan (-1..1) and shift (fraction of a step) use fl_write_steps' scales;
+        FL's raw values are in pan_raw (0-127, 64 = centre) and shift_ticks.
+        A step FL holds no note data for is marked "broken".
+
         Args:
             channel: channel index (global)
             pattern: pattern number (default: the active one; FL switches to it)
             steps: how many steps to scan (default: the pattern's length)
         """
         conn = get_connection()
-        project_files.controller_info(conn)
         params: dict = {"channel": channel, "steps": steps}
         if pattern is not None:
             params["pattern"] = pattern
+        info = project_files.controller_info(conn)
+        step_ticks = max(1, int(info.get("ppq") or 96) // 4)
         result = run(conn, "channels.getSteps", params)
         for entry in result.get("active", []):
-            if isinstance(entry.get("pitch"), int):
-                entry["note"] = midi_to_note_name(entry["pitch"])
+            _readable_step(entry, step_ticks)
         return result
+
+
+# Controller version whose setSteps writes and verifies the shift safely.
+SHIFT_CONTROLLER_VERSION = project_files.LATEST_CONTROLLER_VERSION
+
+
+def _readable_step(entry: dict, step_ticks: int) -> None:
+    """FL's raw step values -> the scales fl_write_steps takes (raw ones kept)."""
+    if any(entry.get(key) == -1 for key in ("pitch", "velocity", "pan")):
+        entry["broken"] = True
+        entry["problem"] = ("FL holds no note data for this step (its values read -1): "
+                            "rewrite it with fl_write_steps")
+        return
+    if isinstance(entry.get("pitch"), int):
+        entry["note"] = midi_to_note_name(entry["pitch"])
+    if isinstance(entry.get("pan"), int):
+        entry["pan_raw"] = entry["pan"]
+        entry["pan"] = round(entry["pan"] / 64 - 1, 3)
+    if isinstance(entry.get("shift"), int):
+        entry["shift_ticks"] = entry["shift"]
+        entry["shift"] = round(entry["shift"] / step_ticks, 3)
 
 
 def _normalize_step(i: int, step: object, ppq: int) -> dict:
@@ -416,10 +448,11 @@ def _normalize_step(i: int, step: object, ppq: int) -> dict:
         pan = step["pan"]
         if isinstance(pan, bool) or not isinstance(pan, (int, float)) or not -1 <= pan <= 1:
             raise ToolError(f"step {i}: pan must be -1..1, got {pan!r}")
-        out["pan"] = int(round((pan + 1) * 64))
+        out["pan"] = min(127, int(round((pan + 1) * 64)))
     if "shift" in step:
         shift = step["shift"]
         if isinstance(shift, bool) or not isinstance(shift, (int, float)) or not 0 <= shift < 1:
             raise ToolError(f"step {i}: shift must be 0 <= shift < 1 (fraction of a step)")
-        out["shift"] = int(round(shift * ppq / 4))
+        step_ticks = max(1, ppq // 4)
+        out["shift"] = min(step_ticks - 1, int(round(shift * step_ticks)))
     return out

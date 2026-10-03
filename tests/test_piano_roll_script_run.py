@@ -187,7 +187,8 @@ def test_enrich_pr_context_uses_controller_and_strips_script_errors(monkeypatch)
 
     enriched = piano_roll._enrich_pr_context(context)
 
-    assert enriched["current_pattern"] == {"index": 3, "name": "Verse 1", "length_beats": 32}
+    # A controller before v5 sends FL's step count as length_beats.
+    assert enriched["current_pattern"] == {"index": 3, "name": "Verse 1", "length_beats": 8.0}
     assert enriched["selected_channel"] == {"index": 1, "name": "TruePianos"}
     assert "selected_channel_error" not in enriched
     assert "current_pattern_error" not in enriched

@@ -426,7 +426,28 @@ def test_render_warns_when_master_fader_is_down(tool, volume):
     warnings = fl_render_mix(sections=False)["analysis"]["warnings"]
     assert warnings[0].startswith(f"Master fader is at {volume:.2f}: the render is (nearly) "
                                   "silent")
-    assert "leaves it there after it ends" in warnings[0]
+    # Unknown whether a clip drives Master: both fixes, the clip one first.
+    assert "fl_edit_arrangement" in warnings[0] and "fl_set_track_volume" in warnings[0]
+
+
+def test_master_warning_names_the_fix_that_works():
+    driven = render_tool.master_silent_warning(0.0, ["Fade out"])
+    assert "'Fade out'" in driven and "fl_edit_arrangement" in driven
+    assert "cannot set Master" in driven and "fl_set_song_position" in driven
+    free = render_tool.master_silent_warning(0.0, [])
+    assert "fl_set_track_volume(track=0, volume=0.8)" in free
+    assert "fl_edit_arrangement" not in free
+
+
+def test_master_warning_checks_the_automation_clips_of_the_file(tool, monkeypatch):
+    fl_render_mix, fake, _, _ = tool
+    fake.master_volume = 0.0
+    original = fake.send_command
+    monkeypatch.setattr(fake, "send_command", lambda a, p=None, t=2.0: (
+        {"success": True, "targets": [{"rec_id": 0x7ABCDEF, "label": "Master volume"}]}
+        if a == "automation.resolve" else original(a, p, t)))
+    warning = fl_render_mix(sections=False)["analysis"]["warnings"][0]
+    assert "No automation clip drives it" in warning
 
 
 def test_render_without_master_volume_does_not_fail(tool):
