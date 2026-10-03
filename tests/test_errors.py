@@ -112,3 +112,23 @@ def test_list_returning_tool_raises_instead_of_empty_list(tools):
 def test_dict_returning_tool_raises(tools):
     with pytest.raises(ToolError, match="boom on transport.getStatus"):
         tools["fl_get_transport_status"]()
+
+
+def test_set_track_volume_refuses_a_fader_above_1(monkeypatch):
+    import fl_studio_mcp.utils.connection as connection
+    from fl_studio_mcp.tools.mixer import register_mixer_tools
+
+    sent = []
+
+    class Conn:
+        def send_command(self, action, params=None, timeout=2.0):
+            sent.append(action)
+            return {"success": True, "volume": 1.0, "volume_db": 5.6}
+
+    monkeypatch.setattr(connection, "get_connection", lambda: Conn())
+    mcp = RecordingMCP()
+    register_mixer_tools(mcp)
+    with pytest.raises(ToolError, match="between 0.0 and 1.0"):
+        mcp.tools["fl_set_track_volume"](track=1, volume=1.1)
+    assert sent == []
+    assert "volume set to 1.000" in mcp.tools["fl_set_track_volume"](track=1, volume=1.0)

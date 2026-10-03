@@ -101,3 +101,10 @@ def test_song_length_with_an_older_controller_assumes_4_4(monkeypatch):
 def test_song_length_in_3_4(monkeypatch):
     tools = make_tools(monkeypatch, LengthConnection(ticks_per_bar=288))
     assert tools["fl_get_song_length"]()["length_bars"] == round(30720 / 288, 3)
+
+
+def test_song_length_with_ticks_per_bar_unknown_is_not_called_outdated(monkeypatch):
+    tools = make_tools(monkeypatch, LengthConnection(ticks_per_bar=None))
+    result = tools["fl_get_song_length"]()
+    assert result["length_bars"] == 80.0
+    assert "outdated" not in result["note"] and "4/4" in result["note"]

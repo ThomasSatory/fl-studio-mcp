@@ -13,6 +13,7 @@ from __future__ import annotations
 import functools
 import math
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio.to_thread
@@ -215,7 +216,7 @@ async def _progress(ctx: Context | None, done: int, total: int, message: str) ->
         pass
 
 
-# Master fader position (0-1.25, 0.8 = 0 dB) at or below which a render is
+# Master fader position (0-1, 0.8 = 0 dB) at or below which a render is
 # (nearly) silent.
 MASTER_SILENT = 0.05
 
@@ -227,6 +228,19 @@ def _master_volume(conn: Any) -> float | None:
         return float(answer["volume"])
     except (ToolError, KeyError, TypeError, ValueError):
         return None
+
+
+def _is_open_project(path: Path, save: bool) -> bool:
+    """True when `path` is the project open in FL (just saved, or the one located)."""
+    if save:
+        return True
+    located = project_files._last_project
+    if located is None:
+        return False
+    try:
+        return path.resolve() == Path(located).resolve()
+    except OSError:
+        return False
 
 
 def register_render_tools(mcp: FastMCP) -> None:
@@ -349,7 +363,9 @@ def register_render_tools(mcp: FastMCP) -> None:
                 notes.append("Section times come from the project tempo; tempo automation "
                              "shifts them.")
         analysis = await _in_thread(mix_analysis.analyze_mix, wav, bounds)
-        master = await _in_thread(_master_volume, conn)
+        # The live fader only says something about the file when it is the open project.
+        master = (await _in_thread(_master_volume, conn)
+                  if _is_open_project(path, save) else None)
         if master is not None and master <= MASTER_SILENT:
             analysis.setdefault("warnings", []).insert(0, (
                 f"Master fader is at {master:.2f}: the render is (nearly) silent; an "

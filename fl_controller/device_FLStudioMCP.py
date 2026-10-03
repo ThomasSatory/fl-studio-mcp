@@ -937,20 +937,6 @@ def handle_mixer_get_all_tracks(params: dict) -> dict:
 _FADER_TOLERANCE = 0.005
 
 
-def _stable_volume(track: int, mode: int = 0) -> float:
-    """Read a track's volume until two consecutive reads agree (at most 6 reads).
-
-    On an automated fader FL has been seen answering the previous value first.
-    """
-    last = mixer.getTrackVolume(track, mode)
-    for _ in range(5):
-        current = mixer.getTrackVolume(track, mode)
-        if abs(current - last) < 1e-6:
-            return current
-        last = current
-    return last
-
-
 def _automation_error(track: int, wanted, reported: float) -> dict:
     return {
         "error": "Mixer track %d's volume did not follow: set to %s, FL Studio reports %.3f. "
@@ -966,7 +952,7 @@ def _automation_error(track: int, wanted, reported: float) -> dict:
 def _set_fader(track: int, value: float):
     """Set the fader (no pickup); {"got": reported} when FL reports another value, else None."""
     mixer.setTrackVolume(track, value, midi.PIM_None)
-    got = _stable_volume(track)
+    got = mixer.getTrackVolume(track)
     if abs(got - value) > _FADER_TOLERANCE:
         return {"got": got}
     return None
@@ -979,7 +965,7 @@ def _set_track_db(track: int, target_db: float):
     does not follow (automation) stops the search, puts the fader back where
     it was and returns an error instead of walking to the wrong end.
     """
-    original = _stable_volume(track)
+    original = mixer.getTrackVolume(track)
     lo, hi = 0.0, 1.0
     for _ in range(30):
         mid = (lo + hi) / 2
@@ -988,7 +974,7 @@ def _set_track_db(track: int, target_db: float):
             mixer.setTrackVolume(track, original, midi.PIM_None)
             return _automation_error(track, "%.3f (searching for %g dB)" % (mid, target_db),
                                      mismatch["got"])
-        if _stable_volume(track, 1) < target_db:
+        if mixer.getTrackVolume(track, 1) < target_db:
             lo = mid
         else:
             hi = mid
@@ -1009,14 +995,19 @@ def handle_mixer_set_track_volume(params: dict) -> dict:
         failure = _set_track_db(track, float(params["db"]))
     else:
         # Explicit PIM_None: with pickup (takeover) FL ignores a jump in value.
-        volume = float(params.get("volume", 0.8))
+        # FL's fader stops at 1.0 (+5.6 dB); compare with what it can hold.
+        volume = min(float(params.get("volume", 0.8)), 1.0)
+        original = mixer.getTrackVolume(track)
         mismatch = _set_fader(track, volume)
-        failure = _automation_error(track, "%.3f" % volume, mismatch["got"]) if mismatch else None
+        failure = None
+        if mismatch:
+            mixer.setTrackVolume(track, original, midi.PIM_None)
+            failure = _automation_error(track, "%.3f" % volume, mismatch["got"])
     if failure:
         return failure
     return {
-        "volume": _stable_volume(track),
-        "volume_db": _stable_volume(track, 1),
+        "volume": mixer.getTrackVolume(track),
+        "volume_db": mixer.getTrackVolume(track, 1),
         "track_name": mixer.getTrackName(track),
     }
 

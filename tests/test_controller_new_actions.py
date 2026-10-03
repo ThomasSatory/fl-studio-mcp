@@ -226,17 +226,21 @@ def test_db_on_a_lagging_fader_returns_an_automation_error(fl):
 def test_fader_position_on_a_lagging_fader_returns_an_automation_error(fl):
     controller, modules = fl
     _lagging_fader(modules["mixer"], start=0.0)
+    mixer = modules["mixer"]
     result = controller.dispatch_command("mixer.setTrackVolume", {"track": 0, "volume": 0.8})
     assert "automat" in result["error"]
+    # The original value (0.0) is put back, like in dB mode.
+    assert [c.args[1] for c in mixer.setTrackVolume.call_args_list] == [0.8, 0.0]
 
 
-def test_volume_readback_waits_for_two_equal_reads(fl):
+def test_fader_above_fl_maximum_is_compared_with_1(fl):
     controller, modules = fl
     mixer = modules["mixer"]
-    reads = iter([0.1, 0.5, 0.5, 0.5, 0.5])  # stale first answer, then the new value
-    mixer.getTrackVolume.side_effect = lambda t, mode=0: next(reads) if mode == 0 else -1.9
-    result = controller.dispatch_command("mixer.setTrackVolume", {"track": 1, "volume": 0.5})
-    assert "error" not in result and result["volume"] == 0.5
+    state = {"v": 0.8}
+    mixer.setTrackVolume.side_effect = lambda t, v, pickup: state.update(v=min(v, 1.0))
+    mixer.getTrackVolume.side_effect = lambda t, mode=0: state["v"] if mode == 0 else 5.6
+    result = controller.dispatch_command("mixer.setTrackVolume", {"track": 1, "volume": 1.2})
+    assert "error" not in result and result["volume"] == 1.0
 
 
 @pytest.mark.parametrize("action, extra", [

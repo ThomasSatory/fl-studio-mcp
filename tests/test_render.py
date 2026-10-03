@@ -23,6 +23,14 @@ if mode == "crash_once":
     if calls == 1:
         os.kill(os.getpid(), signal.SIGSEGV)
     mode = "ok"
+if mode == "partial_crash_once":
+    wav = flp.with_suffix(".wav")
+    if calls == 1:
+        wav.write_bytes(b"RIF")
+        os.kill(os.getpid(), signal.SIGSEGV)
+    if wav.exists():
+        sys.exit(3)  # the partial file of the crash was left behind
+    mode = "ok"
 if mode == "crash":
     os.kill(os.getpid(), signal.SIGSEGV)
 if mode == "sleep":
@@ -180,3 +188,13 @@ def test_normal_failure_is_not_retried(env, monkeypatch, tmp_path):
     with pytest.raises(ToolError, match="exit code 0"):
         render.render_wav(b"x", "s", 30, binary=fake)
     assert counter.read_text() == "1"
+
+
+def test_partial_wav_of_a_crash_is_removed_before_the_retry(env, monkeypatch, tmp_path):
+    fake, _ = env
+    counter = tmp_path / "calls"
+    monkeypatch.setenv("FAKE_FL_MODE", "partial_crash_once")
+    monkeypatch.setenv("FAKE_FL_COUNTER", str(counter))
+    path = render.render_wav(b"x", "s", 30, binary=fake)
+    assert path.read_bytes().startswith(b"RIFF")
+    assert counter.read_text() == "2"

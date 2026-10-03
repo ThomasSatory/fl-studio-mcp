@@ -68,8 +68,8 @@ def register_mixer_tools(mcp: FastMCP) -> None:
 
         Args:
             track: Mixer track index (0 = Master)
-            volume: fader position 0.0-1.25; 0.8 is FL's default (0 dB),
-                    1.0 is +5.6 dB
+            volume: fader position 0.0-1.0; 0.8 is FL's default (0 dB),
+                    1.0 is the maximum (+5.6 dB)
             volume_db: target level in dB (e.g. -6); the fader is moved until
                        FL reports it. Give volume or volume_db, not both.
 
@@ -77,11 +77,12 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         follow; the tool then fails and names the automation.
         """
         if (volume is None) == (volume_db is None):
-            raise ToolError("give exactly one of volume (0-1.25) or volume_db")
+            raise ToolError("give exactly one of volume (0-1.0) or volume_db")
         params: dict = {"track": track}
         if volume is not None:
-            if not 0.0 <= volume <= 1.25:
-                raise ToolError("Volume should be between 0.0 and 1.25")
+            if not 0.0 <= volume <= 1.0:
+                raise ToolError("Volume should be between 0.0 and 1.0 (1.0 is +5.6 dB, "
+                                "FL's maximum)")
             params["volume"] = volume
         else:
             if not -100.0 <= volume_db <= 5.6:

@@ -125,8 +125,11 @@ def register_transport_tools(mcp: FastMCP) -> None:
         per_bar = result.get("ticks_per_bar")
         out = {key: result.get(key) for key in ("seconds", "milliseconds", "ticks", "ppq")}
         if not per_bar and ppq:
-            per_bar = ppq * 4  # older controller: assume 4/4
-            out["note"] = "length_bars assumes 4/4 (the controller script is outdated)"
+            per_bar = ppq * 4
+            if "ticks_per_bar" not in result:
+                out["note"] = "length_bars assumes 4/4 (the controller script is outdated)"
+            else:
+                out["note"] = "FL did not report ticks per bar; length_bars assumes 4/4"
         out["ticks_per_bar"] = per_bar
         out["length_bars"] = (round(ticks / per_bar, 3)
                               if isinstance(ticks, (int, float)) and per_bar else None)

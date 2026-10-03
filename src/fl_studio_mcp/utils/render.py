@@ -252,6 +252,7 @@ def render_wav(
                         "macOS may show a crash dialog for the renderer (a separate FL "
                         "Studio process); it can be dismissed."
                     )
+                wav.unlink(missing_ok=True)  # a partial file from the crash
             stamp = time.strftime("%Y-%m-%d %Hh%Mm%S")
             dest = out_dir / f"{name} {stamp}.wav"
             n = 1

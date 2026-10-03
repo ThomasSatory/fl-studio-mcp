@@ -434,3 +434,20 @@ def test_render_without_master_volume_does_not_fail(tool):
     fake.master_volume = None
     warnings = fl_render_mix(sections=False)["analysis"]["warnings"]
     assert not any("Master fader" in w for w in warnings)
+
+
+def test_master_warning_skipped_when_the_file_is_not_the_open_project(tool, monkeypatch, tmp_path):
+    fl_render_mix, fake, _, flp_path = tool
+    fake.master_volume = 0.0
+    monkeypatch.setattr(project_files, "_last_project", tmp_path / "Other.flp")
+    result = fl_render_mix(sections=False, save=False, project_path=str(flp_path))
+    assert not any("Master fader" in w for w in result["analysis"]["warnings"])
+    assert "mixer.getTrackInfo" not in fake.calls
+
+
+def test_master_warning_kept_for_the_located_open_project_without_saving(tool, monkeypatch):
+    fl_render_mix, fake, _, flp_path = tool
+    fake.master_volume = 0.0
+    monkeypatch.setattr(project_files, "_last_project", flp_path)
+    result = fl_render_mix(sections=False, save=False, project_path=str(flp_path))
+    assert result["analysis"]["warnings"][0].startswith("Master fader is at 0.00")
