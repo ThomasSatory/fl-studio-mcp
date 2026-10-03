@@ -69,3 +69,35 @@ def test_set_tempo_raises_when_not_applied(monkeypatch):
         tools["fl_set_tempo"](140)
     message = str(excinfo.value)
     assert "140" in message and "120" in message
+
+
+class LengthConnection:
+    def __init__(self, **extra):
+        self.answer = {"success": True, "id": "r1", "seconds": 145.45, "milliseconds": 145454,
+                       "ticks": 30720, "ppq": 96, "bars": 80, "steps": 16, "bar_ticks": 23,
+                       **extra}
+
+    def send_command(self, action, params=None, timeout=2.0):
+        assert action == "transport.getLength"
+        return self.answer
+
+
+def test_song_length_separates_length_from_last_position(monkeypatch):
+    tools = make_tools(monkeypatch, LengthConnection(ticks_per_bar=384))
+    result = tools["fl_get_song_length"]()
+    assert result == {
+        "seconds": 145.45, "milliseconds": 145454, "ticks": 30720, "ppq": 96,
+        "ticks_per_bar": 384, "length_bars": 80.0,
+        "last_position": {"bar": 80, "step": 16, "tick": 23},
+    }
+
+
+def test_song_length_with_an_older_controller_assumes_4_4(monkeypatch):
+    tools = make_tools(monkeypatch, LengthConnection())
+    result = tools["fl_get_song_length"]()
+    assert result["length_bars"] == 80.0 and "4/4" in result["note"]
+
+
+def test_song_length_in_3_4(monkeypatch):
+    tools = make_tools(monkeypatch, LengthConnection(ticks_per_bar=288))
+    assert tools["fl_get_song_length"]()["length_bars"] == round(30720 / 288, 3)

@@ -21,9 +21,11 @@ def test_song_length_uses_fl_modes(fl):
     lengths = {0: 60000, 1: 60, 2: 11520, 3: 30, 4: 0, 5: 0}
     modules["transport"].getSongLength.side_effect = lambda mode: lengths[mode]
     modules["general"].getRecPPQ.return_value = 96
+    modules["general"].getRecPPB.return_value = 384
     result = controller.dispatch_command("transport.getLength", {})
     assert (result["ticks"], result["seconds"], result["milliseconds"], result["bars"]) == (
         11520, 60, 60000, 30)
+    assert result["ticks_per_bar"] == 384
 
 
 def test_set_position_by_ticks_and_seconds(fl):

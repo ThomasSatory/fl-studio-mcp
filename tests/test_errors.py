@@ -11,8 +11,36 @@ from fl_studio_mcp.utils.errors import run, unwrap
 from tests.fakes import RecordingMCP
 
 
-def test_unwrap_returns_successful_results_untouched():
-    assert unwrap({"success": True, "count": 3}) == {"success": True, "count": 3}
+def test_unwrap_returns_successful_results_without_the_envelope():
+    result = {"id": "a1b2", "success": True, "count": 3}
+    assert unwrap(result) == {"count": 3}
+    assert result == {"id": "a1b2", "success": True, "count": 3}  # not modified in place
+
+
+def test_run_results_do_not_leak_id_and_success():
+    class Answer:
+        def send_command(self, action, params=None, timeout=2.0):
+            return {"id": "r9", "success": True, "track": 1, "routes": []}
+
+    assert run(Answer(), "mixer.getRouting", {"track": 1}) == {"track": 1, "routes": []}
+
+
+def test_routing_and_effects_tools_do_not_leak_envelope_keys(monkeypatch):
+    import fl_studio_mcp.utils.connection as connection
+    from fl_studio_mcp.tools.mixer import register_mixer_tools
+
+    class Conn:
+        def send_command(self, action, params=None, timeout=2.0):
+            if action == "system.info":
+                return {"id": "s", "success": True, "controller_version": 4}
+            return {"id": "q", "success": True, "track": 1, "routes": [], "effects": []}
+
+    monkeypatch.setattr(connection, "get_connection", lambda: Conn())
+    mcp = RecordingMCP()
+    register_mixer_tools(mcp)
+    for name in ("fl_get_mixer_routing", "fl_list_effects"):
+        result = mcp.tools[name](track=1)
+        assert "id" not in result and "success" not in result
 
 
 @pytest.mark.parametrize(

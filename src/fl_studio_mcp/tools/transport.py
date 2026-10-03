@@ -112,14 +112,27 @@ def register_transport_tools(mcp: FastMCP) -> None:
     def fl_get_song_length() -> dict:
         """Length of the song (playlist arrangement, not the current pattern).
 
-        Returns seconds, milliseconds, absolute ticks, PPQ and bars
-        (whole bars + steps + ticks, like FL's B:S:T display).
+        Returns seconds, milliseconds, ticks, ppq, ticks_per_bar and
+        length_bars (the length in bars, e.g. 80.0 for an 80-bar song).
+        last_position is where the song's last tick sits, as FL's B:S:T
+        display shows it ({"bar": 80, "step": 16, "tick": 23} for an 80-bar
+        song): a position, not a length.
         """
         result = run(get_connection(), "transport.getLength")
         if "ppq" not in result:
             raise ToolError(OUTDATED_CONTROLLER_HINT)
-        keys = ("seconds", "milliseconds", "ticks", "ppq", "bars", "steps", "bar_ticks")
-        return {key: result.get(key) for key in keys}
+        ticks, ppq = result.get("ticks"), result.get("ppq")
+        per_bar = result.get("ticks_per_bar")
+        out = {key: result.get(key) for key in ("seconds", "milliseconds", "ticks", "ppq")}
+        if not per_bar and ppq:
+            per_bar = ppq * 4  # older controller: assume 4/4
+            out["note"] = "length_bars assumes 4/4 (the controller script is outdated)"
+        out["ticks_per_bar"] = per_bar
+        out["length_bars"] = (round(ticks / per_bar, 3)
+                              if isinstance(ticks, (int, float)) and per_bar else None)
+        out["last_position"] = {"bar": result.get("bars"), "step": result.get("steps"),
+                                "tick": result.get("bar_ticks")}
+        return out
 
     @mcp.tool(annotations=IDEMPOTENT)
     def fl_set_loop_mode(mode: str) -> str:

@@ -11,9 +11,13 @@ from typing import Any
 
 from fastmcp.exceptions import ToolError
 
+# Envelope keys the controller adds to every answer (request id, status). They
+# mean nothing to a tool's caller and are dropped from successful results.
+ENVELOPE_KEYS = ("id", "success")
+
 
 def unwrap(result: dict[str, Any]) -> dict[str, Any]:
-    """Return `result` if it is a success, else raise ToolError with its message."""
+    """Return `result` without its envelope keys if it is a success, else raise ToolError."""
     if not isinstance(result, dict):
         raise ToolError(f"Unexpected response from FL Studio: {result!r}")
     failed = result.get("success") is False or (
@@ -21,7 +25,7 @@ def unwrap(result: dict[str, Any]) -> dict[str, Any]:
     )
     if failed:
         raise ToolError(str(result.get("error") or "FL Studio reported a failure"))
-    return result
+    return {key: value for key, value in result.items() if key not in ENVELOPE_KEYS}
 
 
 def run(

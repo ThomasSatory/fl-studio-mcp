@@ -777,6 +777,14 @@ def _ppq() -> int:
         return 96
 
 
+def _ppb():
+    """Ticks per bar (PPQ x beats per bar; ignores time signature markers), or None."""
+    try:
+        return int(_general_mod().getRecPPB()) or None
+    except Exception:
+        return None
+
+
 def handle_transport_set_position(params: dict) -> dict:
     """Set the playback position from absolute ticks or seconds (both int for FL)."""
     if "ticks" in params:
@@ -793,7 +801,12 @@ def handle_transport_set_position(params: dict) -> dict:
 
 
 def handle_transport_get_length() -> dict:
-    """Song length in every unit FL reports (song mode arrangement, not the pattern)."""
+    """Song length in every unit FL reports (song mode arrangement, not the pattern).
+
+    bars/steps/bar_ticks are FL's B:S:T position of the song's last tick (an
+    80-bar song gives 80:16:23), not a length; the server turns them into
+    last_position and computes length_bars from ticks and ticks_per_bar.
+    """
     return {
         "ticks": transport.getSongLength(SONGLENGTH_ABSTICKS),
         "seconds": transport.getSongLength(SONGLENGTH_S),
@@ -802,6 +815,7 @@ def handle_transport_get_length() -> dict:
         "steps": transport.getSongLength(SONGLENGTH_STEPS),
         "bar_ticks": transport.getSongLength(SONGLENGTH_TICKS),
         "ppq": _ppq(),
+        "ticks_per_bar": _ppb(),
     }
 
 

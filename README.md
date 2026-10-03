@@ -334,7 +334,7 @@ retarget it before writing notes to a specific channel.
 | `fl_record` | Toggle recording |
 | `fl_get_transport_status` | Get playback/recording state |
 | `fl_set_song_position` | Move the playhead by 1-based bar, seconds or ticks |
-| `fl_get_song_length` | Song length in seconds, ms, ticks and bars |
+| `fl_get_song_length` | Song length in seconds, ms, ticks and bars (`length_bars`), plus the B:S:T position of its last tick |
 | `fl_set_loop_mode` | Switch between pattern/song mode |
 | `fl_set_playback_speed` | Adjust playback speed (0.25x-4x) |
 | `fl_get_tempo` | Get the project tempo (BPM) |
@@ -535,6 +535,11 @@ The controller script is at version 4: copy
 restart FL Studio. It fixes FL Studio crashing (or saving nothing) when a tool
 saves the project; the server refuses to save through an older script, and
 `fl_connection_status` warns about it.
+
+`fl_get_song_length` returns `length_bars` and `last_position` (`bar`, `step`,
+`tick`: FL's B:S:T position of the last tick) instead of `bars`, `steps` and
+`bar_ticks`, which read like a length. Tool results no longer carry the
+controller's `id` and `success` keys.
 
 ### Changed in 0.4.0
 
