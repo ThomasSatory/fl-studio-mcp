@@ -35,6 +35,10 @@ MIDI_CONSTANTS = {
     "widPianoRoll": 3,
     "FPT_Save": 92,
     "FPT_SaveNew": 93,
+    # midi.PME_* (fl-studio-api-stubs midi/__pme_flags.py); FL 2025 gives the
+    # trigger note pmeFlags=111, which includes both.
+    "PME_System": 1 << 1,
+    "PME_System_Safe": 1 << 2,
     "REC_Plug_First": 0x20000000,
     "REC_Plug_MixLevel": 0x20001F01,
     "REC_Mixer_Vol": 0x20001FC0,

@@ -61,7 +61,7 @@ TRIGGER_NOTE = 127
 
 # Bumped whenever an action is added or changes; the MCP server reads it via
 # system.info to detect an outdated script installed in FL Studio.
-CONTROLLER_VERSION = 3
+CONTROLLER_VERSION = 4
 
 # Project loads seen since the script started (OnProjectLoad), so the server
 # can wait for a reload it requested. The instance id changes when FL reloads
@@ -69,6 +69,12 @@ CONTROLLER_VERSION = 3
 _load_count = 0
 _last_load_status = None
 _instance_id = "%x" % id(object())
+
+# PME flags of the MIDI event that triggered the command being executed (see
+# OnMidiMsg). FL Studio only allows some operations (saving, among others) from
+# an event whose flags say it is safe; calling them without the flags makes FL
+# write nothing and crash a few seconds later.
+_pme_flags = None
 
 
 def OnInit():
@@ -94,8 +100,16 @@ def OnProjectLoad(status):
 def OnMidiMsg(event):
     """Called when a MIDI message is received."""
     # Check for trigger note (Note On, note 127)
+    global _pme_flags
     if event.midiId == 0x90 and event.data1 == TRIGGER_NOTE and event.data2 > 0:
-        execute_pending_command()
+        try:
+            _pme_flags = event.pmeFlags
+        except Exception:
+            _pme_flags = None
+        try:
+            execute_pending_command()
+        finally:
+            _pme_flags = None
         event.handled = True
 
 
@@ -862,6 +876,9 @@ def handle_mixer_get_track_count() -> dict:
 def handle_mixer_get_track_info(params: dict) -> dict:
     """Get info about a mixer track."""
     track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
     return {
         "index": track,
         "name": mixer.getTrackName(track),
@@ -902,37 +919,100 @@ def handle_mixer_get_all_tracks(params: dict) -> dict:
     return {"track_count": track_count, "tracks": tracks}
 
 
-def _set_track_db(track: int, target_db: float) -> None:
-    """Bisect the fader position that gives target_db (FL's curve is not linear)."""
+# A fader position FL reports back differs from the one just set by less than this.
+_FADER_TOLERANCE = 0.005
+
+
+def _stable_volume(track: int, mode: int = 0) -> float:
+    """Read a track's volume until two consecutive reads agree (at most 6 reads).
+
+    On an automated fader FL has been seen answering the previous value first.
+    """
+    last = mixer.getTrackVolume(track, mode)
+    for _ in range(5):
+        current = mixer.getTrackVolume(track, mode)
+        if abs(current - last) < 1e-6:
+            return current
+        last = current
+    return last
+
+
+def _automation_error(track: int, wanted, reported: float) -> dict:
+    return {
+        "error": "Mixer track %d's volume did not follow: set to %s, FL Studio reports %.3f. "
+                 "The fader is probably automated (an automation clip, or a controller "
+                 "linked to it, drives the value; FL keeps an automation clip's last value "
+                 "after the clip ends). Edit or delete the automation clip "
+                 "(fl_edit_arrangement), or unlink the controller, then retry."
+                 % (track, wanted, reported),
+        "automated": True,
+    }
+
+
+def _set_fader(track: int, value: float):
+    """Set the fader (no pickup); {"got": reported} when FL reports another value, else None."""
+    mixer.setTrackVolume(track, value, midi.PIM_None)
+    got = _stable_volume(track)
+    if abs(got - value) > _FADER_TOLERANCE:
+        return {"got": got}
+    return None
+
+
+def _set_track_db(track: int, target_db: float):
+    """Bisect the fader position that gives target_db (FL's curve is not linear).
+
+    Each step checks that FL reports the fader position just set; a fader that
+    does not follow (automation) stops the search, puts the fader back where
+    it was and returns an error instead of walking to the wrong end.
+    """
+    original = _stable_volume(track)
     lo, hi = 0.0, 1.0
     for _ in range(30):
         mid = (lo + hi) / 2
-        mixer.setTrackVolume(track, mid, midi.PIM_None)
-        if mixer.getTrackVolume(track, 1) < target_db:
+        mismatch = _set_fader(track, mid)
+        if mismatch:
+            mixer.setTrackVolume(track, original, midi.PIM_None)
+            return _automation_error(track, "%.3f (searching for %g dB)" % (mid, target_db),
+                                     mismatch["got"])
+        if _stable_volume(track, 1) < target_db:
             lo = mid
         else:
             hi = mid
-    mixer.setTrackVolume(track, hi, midi.PIM_None)
+    mismatch = _set_fader(track, hi)
+    if mismatch:
+        mixer.setTrackVolume(track, original, midi.PIM_None)
+        return _automation_error(track, "%.3f (%g dB)" % (hi, target_db), mismatch["got"])
+    return None
 
 
 def handle_mixer_set_track_volume(params: dict) -> dict:
     """Set mixer track volume (0-1 fader position, or 'db'); pickup mode off."""
-    track = int(params.get("track", 0))
+    track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
     if "db" in params:
-        _set_track_db(track, float(params["db"]))
+        failure = _set_track_db(track, float(params["db"]))
     else:
         # Explicit PIM_None: with pickup (takeover) FL ignores a jump in value.
-        mixer.setTrackVolume(track, float(params.get("volume", 0.8)), midi.PIM_None)
+        volume = float(params.get("volume", 0.8))
+        mismatch = _set_fader(track, volume)
+        failure = _automation_error(track, "%.3f" % volume, mismatch["got"]) if mismatch else None
+    if failure:
+        return failure
     return {
-        "volume": mixer.getTrackVolume(track),
-        "volume_db": mixer.getTrackVolume(track, 1),
+        "volume": _stable_volume(track),
+        "volume_db": _stable_volume(track, 1),
         "track_name": mixer.getTrackName(track),
     }
 
 
 def handle_mixer_set_track_pan(params: dict) -> dict:
     """Set mixer track pan (-1..1); pickup mode off."""
-    track = int(params.get("track", 0))
+    track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
     mixer.setTrackPan(track, float(params.get("pan", 0.0)), midi.PIM_None)
     return {"pan": mixer.getTrackPan(track), "track_name": mixer.getTrackName(track)}
 
@@ -940,6 +1020,9 @@ def handle_mixer_set_track_pan(params: dict) -> dict:
 def handle_mixer_mute_track(params: dict) -> dict:
     """Mute/unmute mixer track."""
     track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
     muted = params.get("muted")  # None = toggle
 
     if muted is None:
@@ -956,6 +1039,9 @@ def handle_mixer_mute_track(params: dict) -> dict:
 def handle_mixer_solo_track(params: dict) -> dict:
     """Solo/unsolo mixer track."""
     track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
     solo = params.get("solo")  # None = toggle
     mode = params.get("mode", 3)
 
@@ -973,6 +1059,9 @@ def handle_mixer_solo_track(params: dict) -> dict:
 def handle_mixer_arm_track(params: dict) -> dict:
     """Toggle arm state of mixer track."""
     track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
     mixer.armTrack(track)
     return {
         "is_armed": mixer.isTrackArmed(track) == 1,
@@ -983,6 +1072,9 @@ def handle_mixer_arm_track(params: dict) -> dict:
 def handle_mixer_set_track_name(params: dict) -> dict:
     """Set mixer track name."""
     track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
     name = params.get("name", "")
     mixer.setTrackName(track, name)
     return {"name": name}
@@ -991,6 +1083,9 @@ def handle_mixer_set_track_name(params: dict) -> dict:
 def handle_mixer_set_track_color(params: dict) -> dict:
     """Set mixer track color."""
     track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
     r = params.get("r", 0)
     g = params.get("g", 0)
     b = params.get("b", 0)
@@ -1003,6 +1098,9 @@ def handle_mixer_set_track_color(params: dict) -> dict:
 def handle_mixer_set_stereo_sep(params: dict) -> dict:
     """Set mixer track stereo separation."""
     track = params.get("track", 0)
+    error = _track_error(track)
+    if error:
+        return {"error": error}
     separation = params.get("separation", 0.0)
     mixer.setTrackStereoSep(track, separation)
     return {"separation": separation}
@@ -1527,11 +1625,26 @@ def handle_system_info(params: dict) -> dict:
     return info
 
 
+SAVE_BUSY_ERROR = "FL Studio is busy and cannot save right now; retry in a moment"
+
+
+def _system_safe() -> bool:
+    """True when the triggering MIDI event allows critical operations (PME_System_Safe)."""
+    return _pme_flags is not None and bool(_pme_flags & midi.PME_System_Safe)
+
+
 def handle_transport_save(params: dict) -> dict:
-    """Save the project (Ctrl+S), or save a new numbered version with new_version."""
+    """Save the project (Ctrl+S), or save a new numbered version with new_version.
+
+    FL must get the triggering event's PME flags: without them (or when FL says
+    the moment is not safe, e.g. a modal window is open) it often writes
+    nothing and crashes seconds later, so the save is refused instead.
+    """
+    if not _system_safe():
+        return {"error": SAVE_BUSY_ERROR, "busy": True}
     general = _general_mod()
     command = midi.FPT_SaveNew if params.get("new_version") else midi.FPT_Save
-    transport.globalTransport(command, 1)
+    transport.globalTransport(command, 1, _pme_flags)
     return {"changed": general.getChangedFlag()}
 
 
@@ -1561,6 +1674,26 @@ def _routes_from(track: int) -> list:
     return routes
 
 
+def _route_path(start: int, goal: int):
+    """Tracks from start to goal following active routes ([start, ..., goal]), or None."""
+    count = mixer.trackCount()
+    previous = {start: None}
+    queue = [start]
+    while queue:
+        track = queue.pop(0)
+        if track == goal:
+            path = []
+            while track is not None:
+                path.append(track)
+                track = previous[track]
+            return path[::-1]
+        for dest in range(count):
+            if dest not in previous and dest != track and mixer.getRouteSendActive(track, dest):
+                previous[dest] = track
+                queue.append(dest)
+    return None
+
+
 def handle_mixer_get_routing(params: dict) -> dict:
     """Where a track sends its signal (with levels on API 36+)."""
     track = params.get("track", 0)
@@ -1581,19 +1714,29 @@ def handle_mixer_set_route(params: dict) -> dict:
     if source == dest:
         return {"error": "A track cannot be routed to itself"}
     enabled = bool(params.get("enabled", True))
+    if enabled and not mixer.getRouteSendActive(source, dest):
+        path = _route_path(dest, source)
+        if path:
+            # FL silently refuses a route that would close a loop.
+            return {"error": "FL refused the route: insert %d already feeds insert %d "
+                             "(feedback loop: %s)" % (dest, source, " -> ".join(
+                                 str(t) for t in path + [dest]))}
     # The route only exists once FL has processed the routing change, and a
     # level can only be set on an existing route.
     mixer.setRouteTo(source, dest, enabled)
     mixer.afterRoutingChanged()
     level_applied = None
+    active = bool(mixer.getRouteSendActive(source, dest))
+    if enabled and not active:
+        return {"error": "FL Studio did not create the route from insert %d to insert %d"
+                         % (source, dest), "active": False}
     if enabled and params.get("level") is not None:
         try:
             mixer.setRouteToLevel(source, dest, float(params["level"]))
             level_applied = mixer.getRouteToLevel(source, dest)
         except Exception as e:
-            return {"error": "Route %s, but its level could not be set (FL API 36+ "
-                    "needed): %s" % ("created" if mixer.getRouteSendActive(source, dest)
-                                     else "not created", e)}
+            return {"error": "Route created, but its level could not be set (needs FL "
+                             "Studio 2025 / API 36+): %s" % e}
     return {
         "source": source,
         "dest": dest,
@@ -1633,6 +1776,10 @@ def handle_mixer_get_peaks(params: dict) -> dict:
     tracks = params.get("tracks")
     if tracks is None:
         tracks = list(range(mixer.trackCount()))
+    for track in tracks:
+        error = _track_error(track)
+        if error:
+            return {"error": error}
     return {"peaks": {str(t): mixer.getTrackPeaks(t, 2) for t in tracks},
             "playing": transport.isPlaying() == 1}
 

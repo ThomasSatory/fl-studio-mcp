@@ -530,6 +530,12 @@ Studio's command-line renderer and analyse the result (whole song, sections
 and per-track stems). It needs numpy (installed with the package). The
 server instructions no longer tell the assistant to ask you for an export.
 
+The controller script is at version 4: copy
+`fl_controller/device_FLStudioMCP.py` into FL Studio again (setup.sh) and
+restart FL Studio. It fixes FL Studio crashing (or saving nothing) when a tool
+saves the project; the server refuses to save through an older script, and
+`fl_connection_status` warns about it.
+
 ### Changed in 0.4.0
 
 `fl_set_song_position(position, mode)` became `fl_set_song_position(bar |

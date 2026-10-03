@@ -170,6 +170,10 @@ def fl_connection_status(reconnect: bool = False) -> dict:
             out["controller_version"] = info.get("controller_version")
             out["fl_version"] = info.get("fl_version")
             out["api_version"] = info.get("api_version")
+            version = int(info.get("controller_version") or 0)
+            if version < project_files.SAVE_CONTROLLER_VERSION:
+                out["controller_warning"] = project_files.OUTDATED_FOR_SAVING.format(
+                    version=version)
         except Exception as e:  # noqa: BLE001 - a status report must not fail
             out["controller_warning"] = str(e)
     return out

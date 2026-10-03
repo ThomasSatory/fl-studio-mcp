@@ -72,6 +72,9 @@ def register_mixer_tools(mcp: FastMCP) -> None:
                     1.0 is +5.6 dB
             volume_db: target level in dB (e.g. -6); the fader is moved until
                        FL reports it. Give volume or volume_db, not both.
+
+        An automated fader (automation clip or linked controller) does not
+        follow; the tool then fails and names the automation.
         """
         if (volume is None) == (volume_db is None):
             raise ToolError("give exactly one of volume (0-1.25) or volume_db")
@@ -248,7 +251,8 @@ def register_mixer_tools(mcp: FastMCP) -> None:
 
         A track keeps its route to Master; add sends on top of it. To move a
         track under a bus instead, send it to the bus and remove the Master
-        route with enabled=False on dest=0.
+        route with enabled=False on dest=0. FL refuses a route that would make
+        a feedback loop (dest already feeds source); the error says so.
 
         Args:
             source: sending mixer track

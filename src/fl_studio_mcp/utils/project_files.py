@@ -25,6 +25,22 @@ from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
 
 # Controller version that has system.info, transport.save and the new actions.
 MIN_CONTROLLER_VERSION = 3
+# Saving needs version 4: older scripts call FL's save without the MIDI event's
+# PME flags, and FL then often writes nothing and crashes seconds later. Reads
+# and live edits work with version 3, so only saving is gated on 4.
+SAVE_CONTROLLER_VERSION = 4
+
+OUTDATED_FOR_SAVING = (
+    "The FLStudioMCP controller script installed in FL Studio (version {version}) is too "
+    "old to save the project: older scripts can make FL Studio crash when saving. Copy "
+    "fl_controller/device_FLStudioMCP.py to FL Studio's Settings/Hardware/FLStudioMCP "
+    "folder (install.sh or scripts/setup.sh does it), then restart FL Studio or reload "
+    "the script (Options > MIDI settings). Until then, save by hand in FL Studio and pass "
+    "save=False where the tool allows it."
+)
+SAVE_BUSY_MARKER = "busy and cannot save"
+SAVE_RETRIES = 3
+SAVE_RETRY_DELAY = 0.5
 
 OUTDATED_FOR_FEATURE = (
     "The FLStudioMCP controller script installed in FL Studio is too old for this tool "
@@ -44,7 +60,8 @@ MIN_RELOAD_WAIT = 4.0
 _last_project: Path | None = None
 
 
-def controller_info(conn, timeout: float = 2.0) -> dict:
+def controller_info(conn, timeout: float = 2.0,
+                    min_version: int = MIN_CONTROLLER_VERSION) -> dict:
     """system.info from the controller; ToolError when the script predates it."""
     try:
         result = conn.send_command("system.info", None, timeout)
@@ -53,8 +70,11 @@ def controller_info(conn, timeout: float = 2.0) -> dict:
     if not result.get("success") and "Unknown action" in str(result.get("error", "")):
         raise ToolError(OUTDATED_FOR_FEATURE.format(action="system.info"))
     info = unwrap(result)
-    if int(info.get("controller_version") or 0) < MIN_CONTROLLER_VERSION:
+    version = int(info.get("controller_version") or 0)
+    if version < MIN_CONTROLLER_VERSION:
         raise ToolError(OUTDATED_FOR_FEATURE.format(action="this action"))
+    if version < min_version:
+        raise ToolError(OUTDATED_FOR_SAVING.format(version=version))
     return info
 
 
@@ -128,9 +148,22 @@ def _mtime(path: Path) -> float:
 
 
 def save_project(conn, new_version: bool = False) -> float:
-    """Ask FL Studio to save; returns the time just before the request."""
+    """Ask FL Studio to save; returns the time just before the request.
+
+    Needs controller version 4 (see SAVE_CONTROLLER_VERSION). The controller
+    refuses to save while FL says it is not safe (a modal window, FL busy);
+    that is retried a few times before giving up.
+    """
+    controller_info(conn, min_version=SAVE_CONTROLLER_VERSION)
     started = time.time() - 1.0  # file system timestamps can be coarse
-    run(conn, "transport.save", {"new_version": new_version}, timeout=SAVE_TIMEOUT)
+    for attempt in range(SAVE_RETRIES):
+        try:
+            run(conn, "transport.save", {"new_version": new_version}, timeout=SAVE_TIMEOUT)
+            return started
+        except ToolError as e:
+            if SAVE_BUSY_MARKER not in str(e) or attempt == SAVE_RETRIES - 1:
+                raise
+            time.sleep(SAVE_RETRY_DELAY)
     return started
 
 

@@ -86,7 +86,7 @@ class FakeFL:
     def send_command(self, action, params=None, timeout=2.0):
         self.calls.append((action, params))
         if action == "system.info":
-            return {"success": True, "controller_version": 3, "instance_id": "a",
+            return {"success": True, "controller_version": 4, "instance_id": "a",
                     "load_count": self.load_count, "changed": 0, "ppq": 96}
         if action == "transport.save":
             os.utime(self.path, (time.time(), time.time()))
@@ -178,7 +178,7 @@ def test_untitled_project_gives_a_clear_error(fl, monkeypatch):
     fake.path.write_bytes(b"")
     os.utime(fake.path, (time.time() - 100, time.time() - 100))
     monkeypatch.setattr(fake, "send_command", lambda a, p=None, t=2.0: (
-        {"success": True, "controller_version": 3, "load_count": 0, "changed": 0}
+        {"success": True, "controller_version": 4, "load_count": 0, "changed": 0}
         if a == "system.info" else {"success": True}))
     with pytest.raises(ToolError, match="untitled"):
         tools["fl_get_arrangement"]()

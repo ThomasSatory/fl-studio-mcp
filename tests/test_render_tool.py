@@ -169,7 +169,7 @@ class FakeFL:
                 {"to": d, "name": f"Insert {d}", "level": level}
                 for d, level in self.routing.get(track, {}).items()]}
         if action == "system.info":
-            return {"success": True, "controller_version": 3}
+            return {"success": True, "controller_version": 4}
         if action == "transport.getTempo":
             return {"success": True, "tempo": self.tempo}
         if action == "channels.getAll":
