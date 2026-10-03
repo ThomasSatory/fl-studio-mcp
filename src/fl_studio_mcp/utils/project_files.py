@@ -20,7 +20,8 @@ from pathlib import Path
 
 from fastmcp.exceptions import ToolError
 
-from fl_studio_mcp.utils.errors import run, unwrap
+from fl_studio_mcp.utils import errors
+from fl_studio_mcp.utils.errors import FLBusyError, run, unwrap
 from fl_studio_mcp.utils.fl_trigger import FL_BUNDLE_ID
 from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
 
@@ -32,7 +33,9 @@ MIN_CONTROLLER_VERSION = 3
 SAVE_CONTROLLER_VERSION = 4
 # The version of fl_controller/device_FLStudioMCP.py in this repository. Only
 # step shift needs 5 (see tools/channels.py); everything else works with 4.
-LATEST_CONTROLLER_VERSION = 5
+# Version 6 checks a written shift against the exact form written and redoes
+# a step FL left without note data; nothing requires it.
+LATEST_CONTROLLER_VERSION = 6
 
 OUTDATED_FOR_SAVING = (
     "The FLStudioMCP controller script installed in FL Studio (version {version}) is too "
@@ -69,32 +72,8 @@ FL_PROCESS_NAME = "OsxFL"  # FL Studio's main process on macOS
 
 # The last project path found, reused while it keeps being the file FL saves to.
 _last_project: Path | None = None
-# (st_mtime_ns, st_size) of project files as they were right after FL saved
-# them or the MCP wrote them: an unchanged project need not be saved again.
-_known_files: dict[str, tuple[int, int]] = {}
-# True once a command that may change the project went to FL since the last
-# save or write (FL's changed flag may not count script edits).
-_mcp_changes = False
 # time.monotonic() when the last MCP-triggered reload finished.
 _reload_finished_at: float | None = None
-
-# Controller actions that leave the project as it is (playhead, selection and
-# windows are not worth a save). Any other action may change the project.
-_NEUTRAL_ACTIONS = {
-    "system.info", "transport.save", "transport.setPosition", "transport.start",
-    "transport.stop", "automation.resolve", "automation.describe", "project.snapshot",
-    "patterns.select", "channels.select", "channels.selectOne", "channels.triggerNote",
-    "pianoroll.open",
-}
-
-
-def note_command(action: str) -> None:
-    """Called for every command sent to FL: remember when the project may have changed."""
-    global _mcp_changes
-    method = action.rsplit(".", 1)[-1]
-    if action in _NEUTRAL_ACTIONS or action.startswith("ui.") or method.startswith(("get", "is")):
-        return
-    _mcp_changes = True
 
 
 def _stat(path: Path) -> tuple[int, int] | None:
@@ -103,15 +82,6 @@ def _stat(path: Path) -> tuple[int, int] | None:
     except OSError:
         return None
     return st.st_mtime_ns, st.st_size
-
-
-def remember_file(path: Path) -> None:
-    """Record `path` as matching the open project (just saved by FL or written by the MCP)."""
-    global _mcp_changes
-    state = _stat(path)
-    if state is not None:
-        _known_files[str(path)] = state
-        _mcp_changes = False
 
 
 def reload_finished() -> None:
@@ -250,32 +220,73 @@ class SaveRequest:
     before: dict[str, tuple[int, int] | None] = field(default_factory=dict)
     temp_before: dict[str, tuple[int, int] | None] = field(default_factory=dict)
     path_hint: Path | None = None  # the file FL is expected to write, for messages
+    # Whether pgrep saw FL running when the save was asked: only then does
+    # "not running" mean FL died during the save.
+    fl_was_running: bool = False
 
 
-def fl_stopped_error(path: Path | None) -> ToolError:
-    """The error for an FL Studio that died or stopped answering during a save."""
+def _last_saved(path: Path | None) -> str:
+    """"Last saved file <path> (modified <time>); MCP backups in <folder>." for messages."""
     if path is None:
-        return ToolError(
-            "FL Studio stopped (it probably crashed) while saving the project. Relaunch FL "
-            "Studio and reopen the project; MCP backups are in the Backup folder next to it."
-        )
+        return "MCP backups are in the Backup folder next to the project."
     try:
         when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime))
     except OSError:
         when = "unknown"
+    return (f"The last saved file is {path} (modified {when}); MCP backups are in "
+            f"{path.parent / 'Backup'}.")
+
+
+def fl_stopped_error(path: Path | None) -> ToolError:
+    """The error for an FL Studio that died or stopped answering during a save."""
+    what = str(path) if path is not None else "the project"
     return ToolError(
-        f"FL Studio stopped (it probably crashed) while saving {path}. The last saved file "
-        f"is {path} (modified {when}); MCP backups are in {path.parent / 'Backup'}. "
-        "Relaunch FL Studio and reopen the project."
+        f"FL Studio stopped (it probably crashed) while saving {what}. {_last_saved(path)} "
+        f"Relaunch FL Studio and reopen {what}."
     )
 
 
-def _fl_answers(conn) -> bool:
+def fl_crashed_error(path: Path | None, log: Path | None = None) -> ToolError:
+    """The error for FL's in-process crash: the process lives on, showing its crash window."""
+    what = str(path) if path is not None else "the project"
+    where = f" (crash log {log})" if log is not None else ""
+    return errors.FLCrashedError(
+        f"FL Studio crashed (its crash window is open{where}) while saving {what}; close "
+        f"it, relaunch FL Studio and reopen {what}. {_last_saved(path)}"
+    )
+
+
+def fl_busy_or_crashed_error(path: Path | None, text: str) -> ToolError:
+    """FL refused the save as unsafe and wrote no crash log: a modal window, or a crash."""
+    what = str(path) if path is not None else "the project"
+    return FLBusyError(
+        f"FL Studio refused to save {what} ({text}): a modal window is open in FL Studio, "
+        "or FL crashed and its crash window is open. Close it; after a crash, relaunch FL "
+        f"Studio and reopen {what}. {_last_saved(path)}"
+    )
+
+
+def _new_crash_log(since: float) -> Path | None:
+    logs = errors.crash_logs_since(since)
+    return logs[0] if logs else None
+
+
+def _fl_state(conn) -> str:
+    """"ok", "gone" (FL does not answer) or "unsafe" (FL refuses commands: crash window)."""
     try:
         result = conn.send_command("system.info", None, 2.0)
     except RuntimeError:
-        return False
-    return bool(result.get("success"))
+        return "gone"
+    if not result.get("success"):
+        return "gone"
+    # system.info answers even behind FL's crash window; a real command does not.
+    try:
+        status = conn.send_command("transport.getStatus", None, 2.0)
+    except RuntimeError as e:
+        return "unsafe" if errors.UNSAFE_MARKER in str(e) else "ok"
+    if errors.UNSAFE_MARKER in str(status.get("error") or ""):
+        return "unsafe"
+    return "ok"
 
 
 def _candidates(project_path: str | None) -> list[Path]:
@@ -301,16 +312,24 @@ def save_project(conn, new_version: bool = False,
         before={str(c): _stat(c) for c in candidates},
         temp_before={str(c): _stat(temp_file(c)) for c in candidates},
         path_hint=candidates[0] if candidates else _last_project,
+        fl_was_running=fl_process_running() is True,
     )
     for attempt in range(SAVE_RETRIES):
         try:
             run(conn, "transport.save", {"new_version": new_version}, timeout=SAVE_TIMEOUT)
             return request
+        except FLBusyError as e:
+            # "Operation unsafe at current time": FL's crash window (or a modal) is open.
+            log = _new_crash_log(min(errors.last_ok(), request.requested))
+            if log is not None:
+                raise fl_crashed_error(request.path_hint, log) from e
+            raise fl_busy_or_crashed_error(request.path_hint, errors.UNSAFE_MARKER) from e
         except ToolError as e:
             if SAVE_BUSY_MARKER in str(e) and attempt < SAVE_RETRIES - 1:
                 time.sleep(SAVE_RETRY_DELAY)
                 continue
-            if SAVE_BUSY_MARKER not in str(e) and fl_process_running() is False:
+            if (SAVE_BUSY_MARKER not in str(e) and request.fl_was_running
+                    and fl_process_running() is False):
                 raise fl_stopped_error(request.path_hint) from e
             raise
     return request
@@ -353,8 +372,10 @@ def locate_saved_project(request: SaveRequest, project_path: str | None = None,
     A file only counts once it changed after the request (another mtime or
     size than just before it) and FL's "<name>.flp~" is gone. With no known
     path, the search folders are walked for an .flp written after the request
-    (search_only: only that, e.g. for "save new version"). If FL Studio's
-    process is gone, or FL stops answering, the save is reported as a crash.
+    (search_only: only that, e.g. for "save new version"). The save is
+    reported as a crash when FL Studio's process is gone (if it ran when the
+    save was asked), when FL wrote a crash log after the request (FL then
+    keeps running behind its crash window), or when FL stops answering.
     """
     global _last_project
     explicit = Path(project_path).expanduser() if project_path else None
@@ -369,22 +390,31 @@ def locate_saved_project(request: SaveRequest, project_path: str | None = None,
         for candidate in known:
             if _saved_since(candidate, request) and _save_finished(candidate, request):
                 _last_project = candidate
-                remember_file(candidate)
                 return candidate
         if explicit is None:
             recent = [p for p in find_recent_projects(request.requested)
                       if not known or p != known[0]]
             if recent and _save_finished(recent[0], request):
                 _last_project = recent[0]
-                remember_file(recent[0])
                 return recent[0]
-        if fl_process_running() is False:
+        log = _new_crash_log(request.requested)
+        if log is not None:
+            raise fl_crashed_error(explicit or request.path_hint, log)
+        if request.fl_was_running and fl_process_running() is False:
             raise fl_stopped_error(explicit or request.path_hint)
         if time.time() > deadline:
             break
         time.sleep(0.3)
-    if conn is not None and not _fl_answers(conn):
-        raise fl_stopped_error(explicit or request.path_hint)
+    if conn is not None:
+        state = _fl_state(conn)
+        if state == "gone":
+            raise fl_stopped_error(explicit or request.path_hint)
+        if state == "unsafe":
+            log = _new_crash_log(request.requested)
+            if log is not None:
+                raise fl_crashed_error(explicit or request.path_hint, log)
+            raise fl_busy_or_crashed_error(explicit or request.path_hint,
+                                           errors.UNSAFE_MARKER)
     if explicit is not None:
         raise ToolError(
             f"FL Studio did not save to {explicit}. Is that the open project? A save "
@@ -397,59 +427,26 @@ def locate_saved_project(request: SaveRequest, project_path: str | None = None,
     )
 
 
-def unchanged_project(info: dict, project_path: str | None) -> Path | None:
-    """The project file when it is known to match FL already, so no save is needed.
-
-    True when FL reports no unsaved change, no MCP command changed the project
-    since, and the file (project_path, or the one located last) is exactly as
-    FL last saved it or the MCP last wrote it. Every avoided save is one less
-    chance for FL to crash while saving.
-    """
-    if info.get("changed") or _mcp_changes:
-        return None
-    candidates = _candidates(project_path)
-    if not candidates:
-        return None
-    candidate = candidates[0]
-    known = _known_files.get(str(candidate))
-    if known is None or _stat(candidate) != known:
-        return None
-    title = info.get("title")
-    if isinstance(title, str) and title.strip() and candidate.stem.lower() not in title.lower():
-        return None  # FL's window names another project
-    return candidate
-
-
-def save_and_locate(conn, project_path: str | None = None, new_version: bool = False,
-                    info: dict | None = None) -> tuple[Path, bool]:
-    """(project file, whether FL saved): saves unless the file is known to be current."""
-    if info is None:
-        info = controller_info(conn)
-    if not new_version:
-        current = unchanged_project(info, project_path)
-        if current is not None:
-            return current, False
+def save_and_locate(conn, project_path: str | None = None, new_version: bool = False) -> Path:
+    """Save the open project and return the .flp FL wrote (always saves)."""
     request = save_project(conn, new_version=new_version, project_path=project_path)
-    path = locate_saved_project(request, None if new_version else project_path, conn,
+    return locate_saved_project(request, None if new_version else project_path, conn,
                                 search_only=new_version)
-    return path, True
 
 
 def current_project_file(conn, save: bool, project_path: str | None) -> Path:
     """The open project's .flp: saved first (Ctrl+S) unless save=False.
 
     With save=False, `project_path` or the last located project is used as is.
-    The save is skipped when FL has nothing unsaved and the file is the one FL
-    last saved (see unchanged_project).
     """
-    info = controller_info(conn)
+    controller_info(conn)
     if not save:
         if project_path:
             return Path(project_path).expanduser()
         if _last_project is not None:
             return _last_project
         raise ToolError("save=False needs project_path (the project was never located)")
-    return save_and_locate(conn, project_path, info=info)[0]
+    return save_and_locate(conn, project_path)
 
 
 def backup_project(path: Path) -> Path:
@@ -466,7 +463,6 @@ def write_atomically(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + ".mcp-tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
-    remember_file(path)
 
 
 def open_in_fl(path: Path) -> None:

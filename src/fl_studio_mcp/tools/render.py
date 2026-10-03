@@ -21,7 +21,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.annotations import ACTION
-from fl_studio_mcp.tools.arrangement import Timeline
+from fl_studio_mcp.tools.arrangement import Timeline, song_end
 from fl_studio_mcp.utils import flp, mix_analysis, project_files, render
 from fl_studio_mcp.utils.errors import run
 from fl_studio_mcp.utils.flp import FLPError, Project
@@ -48,15 +48,45 @@ def _song_end_ticks(project: Project) -> int | None:
 
 
 def song_seconds(project: Project, tempo: float | None = None) -> float | None:
-    """Length of the current arrangement (end of its last clip) in seconds.
+    """Length of the current arrangement in seconds, as FL renders it.
 
+    The song ends with its last clip, or at the last playlist marker when
+    that is later (FL counts markers in the song length).
     tempo: BPM; default the file's (FL 2025 files may not store one).
     """
-    end = _song_end_ticks(project)
+    if _song_end_ticks(project) is None:
+        return None
+    arr = project.arrangement()
+    end = song_end(arr.clips, arr.markers)
     tempo = tempo or project.tempo
-    if end is None or not tempo:
+    if not tempo:
         return None
     return _seconds(end, project.ppq, tempo)
+
+
+TRAILING_SILENCE = 2.0  # seconds of silence at the end worth a warning
+
+
+def trailing_silence_warning(project: Project | None, seconds: float | None) -> str | None:
+    """A warning for silence at the end of the render, naming a marker that causes it."""
+    if seconds is None or seconds <= TRAILING_SILENCE:
+        return None
+    text = f"{seconds} s of silence at the end of the render"
+    try:
+        arr = project.arrangement() if project is not None else None
+    except FLPError:
+        arr = None
+    if arr is not None and arr.clips and arr.markers:
+        clips_end = max(c.end for c in arr.clips)
+        last = max(arr.markers, key=lambda m: m.position)
+        if last.position > clips_end:
+            timeline = Timeline(project.ppq, project.bar_ticks)
+            return (f"{text}: the playlist marker {last.name or 'unnamed'!r} at bar "
+                    f"{timeline.bar(last.position):g} lies past the last clip (which ends at "
+                    f"bar {timeline.bar(clips_end):g}), and FL counts markers in the song "
+                    "length, so the render runs on to it. Move or delete that marker to end "
+                    "the song with the music.")
+    return text + " (a long effect tail, or clips that end in silence)."
 
 
 def section_bounds(project: Project, tempo: float | None = None) -> list[dict]:
@@ -397,6 +427,10 @@ def register_render_tools(mcp: FastMCP) -> None:
         # The live fader only says something about the file when it is the open project.
         master = (await _in_thread(_master_volume, conn)
                   if _is_open_project(path, save) else None)
+        tail = trailing_silence_warning(
+            project, (analysis.get("silence") or {}).get("trailing_seconds"))
+        if tail:
+            analysis.setdefault("warnings", []).append(tail)
         if master is not None and master <= MASTER_SILENT:
             clips = (await _in_thread(_master_automation, conn, project)
                      if project is not None else None)

@@ -161,8 +161,8 @@ def song(tmp_path):
 
 def test_a_file_written_just_before_the_request_is_not_taken_for_the_save(song):
     conn = LateSaver(song)
-    path, saved = project_files.save_and_locate(conn, str(song))
-    assert saved and path == song
+    path = project_files.save_and_locate(conn, str(song))
+    assert path == song
     assert song.read_bytes() == b"new content 1"  # waited for FL's write and rename
     assert not project_files.temp_file(song).exists()
 
@@ -171,41 +171,18 @@ def test_a_stale_temp_file_from_a_crash_does_not_block_the_save(song):
     stale = project_files.temp_file(song)
     stale.write_bytes(b"")
     conn = LateSaver(song, delay=0.2, use_temp=False)
-    path, _ = project_files.save_and_locate(conn, str(song))
+    path = project_files.save_and_locate(conn, str(song))
     assert path.read_bytes() == b"new content 1"
     assert stale.exists()
 
 
-def test_no_save_when_fl_has_nothing_unsaved_and_the_file_is_current(song):
-    conn = LateSaver(song, delay=0.1)
+def test_every_save_really_saves_even_when_nothing_changed(song):
+    conn = LateSaver(song, delay=0.1, changed=0, title="FL Studio 2025")
     project_files.save_and_locate(conn, str(song))
-    conn.changed = 0
-    path, saved = project_files.save_and_locate(conn, str(song))
-    assert (path, saved, conn.saves) == (song, False, 1)
-
-
-def test_unsaved_changes_or_mcp_edits_or_another_title_force_a_save(song):
-    conn = LateSaver(song, delay=0.1, changed=0, title="Song - FL Studio 2025")
-    project_files.save_and_locate(conn, str(song))  # nothing known yet: saves
-    assert conn.saves == 1
-    project_files.note_command("arrangement.addMarker")
     project_files.save_and_locate(conn, str(song))
-    assert conn.saves == 2
-    project_files.note_command("mixer.getTrackInfo")  # a read changes nothing
-    assert project_files.save_and_locate(conn, str(song))[1] is False
-    conn.title = "Other beat - FL Studio 2025"
-    project_files.save_and_locate(conn, str(song))
+    assert project_files.current_project_file(conn, True, str(song)) == song
     assert conn.saves == 3
-    conn.title, conn.changed = "Song - FL Studio 2025", 1
-    project_files.save_and_locate(conn, str(song))
-    assert conn.saves == 4
-
-
-def test_a_file_changed_behind_our_back_is_saved_again(song):
-    conn = LateSaver(song, delay=0.1, changed=0)
-    project_files.save_and_locate(conn, str(song))
-    song.write_bytes(b"edited elsewhere")
-    assert project_files.save_and_locate(conn, str(song))[1] is True
+    assert song.read_bytes() == b"new content 3"
 
 
 def test_save_waits_for_fl_to_settle_after_a_reload(song, monkeypatch):
@@ -241,7 +218,8 @@ def test_fl_not_answering_after_the_save_timeout_is_reported_as_a_crash(song, mo
 
 
 def test_save_request_failing_with_fl_gone_is_reported_as_a_crash(monkeypatch):
-    monkeypatch.setattr(project_files, "fl_process_running", lambda: False)
+    running = iter([True, False])  # running when asked, gone after the failure
+    monkeypatch.setattr(project_files, "fl_process_running", lambda: next(running, False))
     conn = SaveConnection(save_answers=[{"success": False, "error": "Timeout waiting"}])
     with pytest.raises(ToolError, match="probably crashed"):
         project_files.save_project(conn)
@@ -253,3 +231,94 @@ def test_written_after_allows_no_slack_on_fine_timestamps():
     assert project_files.written_after(int((t + 0.01) * 1e9), t)
     # A whole-second mtime (coarse file system) in the request's second is accepted.
     assert project_files.written_after(1_700_000_000 * 1_000_000_000, t)
+
+
+def test_pgrep_not_seeing_fl_is_no_crash_when_it_never_saw_fl(song, monkeypatch):
+    # FL under another process name (or pgrep blind): "not running" proves nothing.
+    monkeypatch.setattr(project_files, "SAVE_TIMEOUT", 0.3)
+    monkeypatch.setattr(project_files, "fl_process_running", lambda: False)
+    conn = LateSaver(song, delay=60)
+    with pytest.raises(ToolError, match="did not save to") as e:
+        project_files.save_and_locate(conn, str(song))
+    assert "crashed" not in str(e.value)
+    for timer in conn.timers:
+        timer.cancel()
+    conn = SaveConnection(save_answers=[{"success": False, "error": "Timeout waiting"}])
+    with pytest.raises(ToolError, match="Timeout waiting"):
+        project_files.save_project(conn)
+
+
+def _crash_log(errors_module, name="Crash 2026-10-03_142507.log"):
+    folder = errors_module.crash_logs_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    log = folder / name
+    log.write_text("EAccessViolation - Access violation - main thread")
+    return log
+
+
+def test_fl_crash_window_during_the_save_is_reported_from_its_crash_log(song, monkeypatch):
+    from fl_studio_mcp.utils import errors
+
+    conn = LateSaver(song, delay=60)
+    request = project_files.save_project(conn, project_path=str(song))
+    log = _crash_log(errors)  # FL crashed: its process lives on behind the crash window
+    with pytest.raises(errors.FLCrashedError) as e:
+        project_files.locate_saved_project(request, str(song), conn)
+    text = str(e.value)
+    assert "crash window is open" in text and str(log) in text
+    assert f"reopen {song}" in text and str(song.parent / "Backup") in text
+    assert "dialog may be waiting" not in text
+    for timer in conn.timers:
+        timer.cancel()
+
+
+def test_an_old_crash_log_is_not_this_save(song, monkeypatch):
+    from fl_studio_mcp.utils import errors
+
+    log = _crash_log(errors, "Crash old.log")
+    import os
+    os.utime(log, (1_000_000, 1_000_000))
+    conn = LateSaver(song, delay=0.1)
+    assert project_files.save_and_locate(conn, str(song)) == song
+
+
+UNSAFE = {"success": False, "error": "Error executing command: Operation unsafe at current time"}
+
+
+def test_save_refused_as_unsafe_after_a_crash(monkeypatch):
+    from fl_studio_mcp.utils import errors
+
+    _crash_log(errors)
+    conn = SaveConnection(save_answers=[UNSAFE])
+    with pytest.raises(errors.FLCrashedError, match=r"crashed \(its crash window is open"):
+        project_files.save_project(conn)
+    assert conn.sent.count("transport.save") == 1
+
+
+def test_save_refused_as_unsafe_without_a_crash_log(monkeypatch):
+    from fl_studio_mcp.utils import errors
+
+    conn = SaveConnection(save_answers=[UNSAFE])
+    with pytest.raises(errors.FLBusyError) as e:
+        project_files.save_project(conn)
+    assert not isinstance(e.value, errors.FLCrashedError)
+    assert "modal window" in str(e.value) and "crash window" in str(e.value)
+
+
+def test_save_timeout_with_fl_refusing_commands_is_not_blamed_on_a_dialog(song, monkeypatch):
+    monkeypatch.setattr(project_files, "SAVE_TIMEOUT", 0.3)
+    conn = LateSaver(song, delay=60)
+    request = project_files.save_project(conn, project_path=str(song))
+    real = conn.send_command
+
+    def refusing(action, params=None, timeout=2.0):
+        if action == "transport.getStatus":
+            return dict(UNSAFE)
+        return real(action, params, timeout)
+
+    conn.send_command = refusing
+    with pytest.raises(ToolError, match="crash window") as e:
+        project_files.locate_saved_project(request, str(song), conn)
+    assert "Is that the open project" not in str(e.value)
+    for timer in conn.timers:
+        timer.cancel()

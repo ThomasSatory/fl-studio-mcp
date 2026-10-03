@@ -15,6 +15,7 @@ from fastmcp.exceptions import ToolError
 from fl_studio_mcp.tools.annotations import ACTION, IDEMPOTENT, READ_ONLY
 from fl_studio_mcp.utils import project_files
 from fl_studio_mcp.utils.errors import run
+from fl_studio_mcp.utils.flp import FLPError, Project
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -85,21 +86,75 @@ def register_playlist_tools(mcp: FastMCP) -> None:
         })
 
     @mcp.tool(annotations=ACTION)
-    def fl_add_marker(bar: float, name: str, beats_per_bar: int = 4) -> dict:
+    def fl_add_marker(bar: float, name: str, beats_per_bar: int | None = None,
+                      save: bool = True, project_path: str | None = None) -> dict:
         """Add a playlist time marker (e.g. "Verse 1") at a 1-based bar.
+
+        FL toggles markers: adding one where a marker already is deletes that
+        marker and adds nothing. So the project is saved and read first, and a
+        position that already has a marker is refused; after adding, the
+        project is saved again and the new marker checked in the file.
 
         Args:
             bar: 1-based bar (9 = start of bar 9; 9.5 = half-way through it)
             name: marker label
-            beats_per_bar: time signature numerator (default 4)
+            beats_per_bar: time signature numerator (default: the project's)
+            save: check the position and the result through the saved file (default
+                  True); with False the marker is added unchecked
+            project_path: the open project's .flp, when it cannot be found automatically
         """
         if isinstance(bar, bool) or not isinstance(bar, (int, float)) or not math.isfinite(bar):
             raise ToolError(f"bar must be a number >= 1, got {bar!r}")
         if bar < 1:
             raise ToolError(f"bar must be >= 1, got {bar!r}")
+        if beats_per_bar is not None and (isinstance(beats_per_bar, bool)
+                                          or not isinstance(beats_per_bar, int)
+                                          or not 1 <= beats_per_bar <= 32):
+            raise ToolError(f"beats_per_bar must be an integer 1-32, got {beats_per_bar!r}")
         conn = get_connection()
         info = project_files.controller_info(conn)
         ppq = int(info.get("ppq") or 96)
-        ticks = int(round((bar - 1) * beats_per_bar * ppq))
+        if not save:
+            ticks = int(round((bar - 1) * (beats_per_bar or 4) * ppq))
+            run(conn, "arrangement.addMarker", {"ticks": ticks, "name": name})
+            return {"bar": bar, "name": name, "ticks": ticks, "verified": False,
+                    "note": "save=False: not checked. If a marker was already at this "
+                            "position, FL deleted it instead of adding this one."}
+        path = project_files.current_project_file(conn, True, project_path)
+        project = _read_project(path)
+        bar_ticks = beats_per_bar * project.ppq if beats_per_bar else project.bar_ticks
+        ticks = int(round((bar - 1) * bar_ticks))
+        markers = _markers(project, path)
+        there = [m for m in markers if m.position == ticks]
+        if there:
+            raise ToolError(
+                f"Bar {bar:g} already has a marker ({there[0].name or 'unnamed'!r}). FL "
+                "toggles markers: adding another there would delete it and add nothing. "
+                "Nothing was changed; pick another position (e.g. a fraction of a bar "
+                "later) or keep the existing marker.")
         run(conn, "arrangement.addMarker", {"ticks": ticks, "name": name})
-        return {"bar": bar, "name": name, "ticks": ticks}
+        after = project_files.current_project_file(conn, True, str(path))
+        added = [m for m in _markers(_read_project(after), after) if m.position == ticks]
+        if not added:
+            raise ToolError(
+                f"FL Studio did not add the marker {name!r} at bar {bar:g}: the saved "
+                f"project {after} has no marker there.")
+        result = {"bar": bar, "name": name, "ticks": ticks, "verified": True,
+                  "project": str(after)}
+        if added[0].name != name:
+            result["note"] = f"FL saved the marker as {added[0].name!r}."
+        return result
+
+
+def _read_project(path):
+    try:
+        return Project.parse(path.read_bytes())
+    except (OSError, FLPError) as e:
+        raise ToolError(f"Cannot read {path}: {e}") from e
+
+
+def _markers(project, path) -> list:
+    try:
+        return project.arrangement().markers
+    except FLPError as e:
+        raise ToolError(f"Cannot read the markers of {path}: {e}") from e

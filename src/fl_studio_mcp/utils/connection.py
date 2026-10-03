@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from fl_studio_mcp.utils import errors
 from fl_studio_mcp.utils.midi_connection import (
     get_connection as get_midi_connection,
 )
@@ -66,10 +67,9 @@ class FLConnection:
         Raises:
             RuntimeError: If not connected or command fails
         """
-        from fl_studio_mcp.utils import project_files  # noqa: PLC0415 - avoids an import cycle
-
-        project_files.note_command(action)
-        return self._midi.send_command(action, params, timeout)
+        result = self._midi.send_command(action, params, timeout)
+        errors.note_answer(action, result)
+        return result
 
     def get_status(self) -> dict[str, Any]:
         """Get connection status information."""

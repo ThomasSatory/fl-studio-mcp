@@ -132,3 +132,41 @@ def test_set_track_volume_refuses_a_fader_above_1(monkeypatch):
         mcp.tools["fl_set_track_volume"](track=1, volume=1.1)
     assert sent == []
     assert "volume set to 1.000" in mcp.tools["fl_set_track_volume"](track=1, volume=1.0)
+
+
+def test_operation_unsafe_is_explained(monkeypatch, tmp_path):
+    from fl_studio_mcp.utils import errors
+
+    class Conn:
+        def send_command(self, action, params=None, timeout=2.0):
+            return {"success": False, "error": "Operation unsafe at current time"}
+
+    with pytest.raises(errors.FLBusyError) as e:
+        errors.run(Conn(), "mixer.setTrackVolume", {})
+    assert "modal window" in str(e.value) and "crash window" in str(e.value)
+    assert not isinstance(e.value, errors.FLCrashedError)
+
+    folder = errors.crash_logs_dir()
+    folder.mkdir(parents=True)
+    (folder / "Crash 1.log").write_text("x")
+    with pytest.raises(errors.FLCrashedError, match="FL Studio crashed: its crash window"):
+        errors.unwrap({"success": False, "error": "Operation unsafe at current time"})
+
+
+def test_crash_logs_before_the_last_successful_command_are_old(monkeypatch):
+    import os
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    folder = errors.crash_logs_dir()
+    folder.mkdir(parents=True)
+    log = folder / "Crash old.log"
+    log.write_text("x")
+    os.utime(log, (time.time() - 100, time.time() - 100))
+    errors.note_answer("mixer.getTrackInfo", {"success": True})
+    errors.note_answer("system.info", {"success": True})  # answers even after a crash
+    assert errors.crash_logs_since(errors.last_ok()) == []
+    with pytest.raises(errors.FLBusyError) as e:
+        errors.unwrap({"success": False, "error": "Operation unsafe at current time"})
+    assert not isinstance(e.value, errors.FLCrashedError)

@@ -292,3 +292,59 @@ def test_automation_edits_move_the_playhead_through_the_clip(fl):
     moves = [p["ticks"] for a, p in fake.calls[opened:] if a == "transport.setPosition"]
     assert moves == [2 * 384, 0]
     assert "bar 3" in result["automation_note"]
+
+
+def test_the_playhead_visits_the_latest_clip_first_and_ends_on_the_earliest(fl):
+    tools, fake, path = fl
+    result = tools["fl_edit_arrangement"](
+        [{"op": "automation", "target": {"type": "tempo"}, "track": 5, "name": "A",
+          "points": [{"bar": 3, "value": 0.2}, {"bar": 5, "value": 0.6}]},
+         {"op": "automation", "target": {"type": "tempo"}, "track": 6, "name": "B",
+          "points": [{"bar": 7, "value": 0.2}, {"bar": 9, "value": 0.6}]}],
+        project_path=str(path))
+    opened = fake.calls.index(("open", str(path)))
+    moves = [p["ticks"] for a, p in fake.calls[opened:] if a == "transport.setPosition"]
+    assert moves == [6 * 384, 2 * 384, 0]  # FL holds the earliest clip's value at bar 1
+    assert "bar 7, 3" in result["automation_note"]
+
+
+def test_no_automation_claim_in_pattern_mode(fl, monkeypatch):
+    tools, fake, path = fl
+    real = fake.send_command
+
+    def pattern_mode(action, params=None, timeout=2.0):
+        if action == "transport.getStatus":
+            fake.calls.append((action, params))
+            return {"success": True, "loop_mode": "pattern", "position": "1:01:00"}
+        return real(action, params, timeout)
+
+    monkeypatch.setattr(fake, "send_command", pattern_mode)
+    result = tools["fl_edit_arrangement"](
+        [{"op": "automation", "target": {"type": "tempo"}, "track": 5,
+          "points": [{"bar": 3, "value": 0.2}, {"bar": 5, "value": 0.6}]}],
+        project_path=str(path))
+    opened = fake.calls.index(("open", str(path)))
+    moves = [p["ticks"] for a, p in fake.calls[opened:] if a == "transport.setPosition"]
+    assert moves == []
+    note = result["automation_note"]
+    assert "pattern mode" in note and "was not passed" in note and "applies" not in note
+
+
+def test_markers_past_the_last_clip_count_in_the_song_length(fl):
+    tools, fake, path = fl
+    # The file's markers are at bars 1 and 9; FL reports 3072 ticks (8 bars).
+    result = tools["fl_edit_arrangement"](
+        [{"op": "clear"}, {"op": "place", "pattern": "Intro", "track": 1, "bar": 1}],
+        project_path=str(path))
+    assert result["song_length_bars"] == result["expected_length_bars"] == 8.0
+    assert "length_warning" not in result
+    assert "marker" in result["length_note"] and "bar 9" in result["length_note"]
+
+
+def test_song_end_counts_markers():
+    from fl_studio_mcp.utils.flp import Marker
+
+    clips = [Clip(position=0, length=768, track=0, pattern=1)]
+    assert arr_tools.song_end(clips, []) == 768
+    assert arr_tools.song_end(clips, [Marker(position=3072, name="End")]) == 3072
+    assert arr_tools.song_end([], []) == 0

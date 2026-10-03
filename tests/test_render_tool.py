@@ -472,3 +472,20 @@ def test_master_warning_kept_for_the_located_open_project_without_saving(tool, m
     monkeypatch.setattr(project_files, "_last_project", flp_path)
     result = fl_render_mix(sections=False, save=False, project_path=str(flp_path))
     assert result["analysis"]["warnings"][0].startswith("Master fader is at 0.00")
+
+
+def test_song_seconds_run_to_a_marker_past_the_last_clip():
+    # FL counts markers in the song length: the render runs on to the last one.
+    assert render_tool.song_seconds(song(16, markers=[(20 * BAR, "End")])) == pytest.approx(40.0)
+    assert render_tool.song_seconds(song(16, markers=[(4 * BAR, "B")])) == pytest.approx(32.0)
+
+
+def test_trailing_silence_warning_names_the_marker_that_causes_it():
+    project = song(16, markers=[(0, "Intro"), (20 * BAR, "Outro end")])
+    text = render_tool.trailing_silence_warning(project, 8.0)
+    assert "'Outro end' at bar 21" in text and "ends at bar 17" in text
+    assert "counts markers in the song length" in text
+    plain = render_tool.trailing_silence_warning(song(16, markers=[(0, "Intro")]), 3.0)
+    assert plain.startswith("3.0 s of silence") and "marker" not in plain
+    assert render_tool.trailing_silence_warning(project, 1.0) is None
+    assert render_tool.trailing_silence_warning(None, None) is None

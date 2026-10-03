@@ -530,19 +530,34 @@ Studio's command-line renderer and analyse the result (whole song, sections
 and per-track stems). It needs numpy (installed with the package). The
 server instructions no longer tell the assistant to ask you for an export.
 
-The controller script is at version 5: copy
+The controller script is at version 6: copy
 `fl_controller/device_FLStudioMCP.py` into FL Studio again (setup.sh) and
 restart FL Studio. Version 4 fixed FL Studio crashing (or saving nothing) when
 a tool saves the project; the server refuses to save through an older script,
 and `fl_connection_status` warns about it. Version 5 is only required for
 `shift` in `fl_write_steps` (it now writes, reads back and checks every step
-parameter); it also reports pattern lengths in both steps and beats.
+parameter); it also reports pattern lengths in both steps and beats. Version 6
+checks a written shift strictly and rewrites a step FL left without its note.
 
-Saving is more careful: a tool only takes the project file once FL has really
-written it (the file changed after the request and FL's `.flp~` temporary file
-is gone), does not save when FL has nothing unsaved and the file is current
-(`fl_save_project` then answers `"saved": false`), waits 3 s after a reload it
-caused, and says so when FL Studio crashes or stops answering during a save.
+Renders no longer make FL Studio crash: the command-line renderer is a second
+FL Studio that rewrites FL's shared settings files when it exits (reg.xml, the
+browser's recent files and search cache, note colour presets, velocity curves),
+after which the FL you work in crashed at its next save. `fl_render_mix` now
+puts back every such file the render changed.
+
+Saving is more careful: every save really saves (and so changes the file's
+modification time, also before an edit that turns out to change nothing). A
+tool only takes the project file once FL has really written it (the file
+changed after the request and FL's `.flp~` temporary file is gone), waits 3 s
+after a reload it caused, and says so when FL Studio crashes during a save,
+including when FL stays open behind its crash window (a new crash log, or
+"Operation unsafe at current time", which other tools now explain too).
+
+`fl_add_marker` refuses a position that already has a marker (FL would delete
+that marker and add nothing) and checks the new marker in the saved project.
+Song lengths count playlist markers like FL does: a marker past the last clip
+no longer raises a false `length_warning`, and `fl_render_mix` says when such
+a marker causes silence at the end of the render.
 
 `length_beats` from `fl_list_patterns` is now in beats (it was FL's 16th-step
 count, 4x too big, so `place` without `length_bars` placed 4x too long);

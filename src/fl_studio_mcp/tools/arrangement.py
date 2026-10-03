@@ -460,18 +460,40 @@ def _apply_automation_now(conn, starts: list[int], timeline: Timeline) -> str | 
 
     After a reload FL keeps the saved parameter value until the playhead
     enters an automation clip (a fixed "fade out" left Master at 0 live).
-    Passing the playhead over each clip's start makes FL apply it now.
+    Passing the playhead over each clip's start makes FL apply it now. The
+    clips are visited latest first, so FL ends up holding the earliest
+    clip's start value (the one in force from bar 1). In pattern mode the
+    playhead moves inside the pattern, not the song: nothing is done then.
     """
     try:
-        for start in sorted(set(starts)):
+        status = run(conn, "transport.getStatus")
+    except ToolError:
+        status = {}
+    if status.get("loop_mode") == "pattern":
+        return ("FL is in pattern mode, so the playhead was not passed over the edited "
+                "automation clip(s): FL keeps the saved value until song playback enters a "
+                "clip. Switch FL to song mode and move the playhead into the clip with "
+                "fl_set_song_position to apply it now.")
+    ordered = sorted(set(starts), reverse=True)
+    try:
+        for start in ordered:
             run(conn, "transport.setPosition", {"ticks": start})
         run(conn, "transport.setPosition", {"ticks": 0})
     except ToolError:
         return None
-    bars = ", ".join(f"{timeline.bar(t):g}" for t in sorted(set(starts)))
+    bars = ", ".join(f"{timeline.bar(t):g}" for t in ordered)
     return (f"The playhead was moved to the edited automation clip(s) (bar {bars}) and back "
             "to bar 1 so FL applies their values now. FL holds an automation clip's last "
             "value after the clip ends.")
+
+
+def song_end(clips, markers) -> int:
+    """Where FL's song ends (ticks): the last clip's end or the last marker, if later.
+
+    FL counts playlist markers in the song length (live: a marker past the
+    last clip made the song, and renders, run on to it).
+    """
+    return max([c.end for c in clips] + [m.position for m in markers] + [0])
 
 
 def _load_checked(path: Path) -> tuple[Project, bytes]:
@@ -495,19 +517,13 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
     def fl_save_project(new_version: bool = False, project_path: str | None = None) -> dict:
         """Save the open project (Ctrl+S) and return the path of the saved .flp.
 
-        When FL has no unsaved change and the file is the one it last saved,
-        nothing is saved ("saved": false): the file is already current.
-
         Args:
             new_version: save as a new numbered version ("Save new version")
             project_path: the .flp you expect FL to save to; found automatically if omitted
         """
         conn = get_connection()
-        path, saved = project_files.save_and_locate(conn, project_path, new_version)
-        out = {"saved": saved, "project": str(path)}
-        if not saved:
-            out["note"] = "No unsaved changes: the file on disk is already current."
-        return out
+        path = project_files.save_and_locate(conn, project_path, new_version)
+        return {"saved": True, "project": str(path)}
 
     @mcp.tool(annotations=IDEMPOTENT)
     def fl_get_arrangement(
@@ -649,7 +665,9 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
         if data == original:
             return {"changed": False, "log": log, "clips_before": before,
                     "clips_after": len(new_clips), "project": str(path),
-                    "note": "Nothing changed: no file written, no backup, FL not reloaded."}
+                    "note": ("Nothing changed: the MCP wrote no file, made no backup and did "
+                             "not reload FL (FL itself saved the project first, as before "
+                             "every edit).")}
         check = Project.parse(data).arrangement(arr.index)
         expected = sorted((c.position, c.track, c.pattern, c.channel, c.length) for c in new_clips)
         written = sorted((c.position, c.track, c.pattern, c.channel, c.length)
@@ -667,16 +685,23 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
                 result["automation_note"] = note
         try:
             length = run(conn, "transport.getLength")
-            expected_end = max((c.end for c in new_clips), default=0)
+            clips_end = max((c.end for c in new_clips), default=0)
+            expected_end = song_end(new_clips, arr.markers)
             song = round(timeline.bars(length.get("ticks") or 0), 2)
             wanted = round(timeline.bars(expected_end), 2)
             result["song_length_bars"] = song
             result["expected_length_bars"] = wanted
+            if expected_end > clips_end:
+                result["length_note"] = (
+                    f"A playlist marker lies past the last clip (clips end at bar "
+                    f"{timeline.bar(clips_end):g}, the last marker is at bar "
+                    f"{timeline.bar(expected_end):g}): FL counts markers in the song length, "
+                    "so playback and renders run on to it.")
             if abs(song - wanted) > 0.05:
                 result["length_warning"] = (
-                    f"FL reports a {song:g}-bar song, the clips written end at bar "
-                    f"{wanted + 1:g}: FL may have resized clips to their pattern's length; "
-                    "check with fl_get_arrangement.")
+                    f"FL reports a {song:g}-bar song, the clips and markers written end at "
+                    f"bar {wanted + 1:g}: FL may have resized clips to their pattern's "
+                    "length; check with fl_get_arrangement.")
         except ToolError:
             pass
         return result
