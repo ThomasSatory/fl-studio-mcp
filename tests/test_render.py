@@ -18,7 +18,9 @@ flp = Path(sys.argv[-1])
 if mode == "sleep":
     time.sleep(60)
 elif mode == "ok":
-    flp.with_suffix(".wav").write_bytes(b"RIFF....WAVE")
+    flp.with_suffix(".wav").write_bytes(b"RIFF" + bytes(60))
+elif mode == "tiny":
+    flp.with_suffix(".wav").write_bytes(b"RIFF")
 """
 
 
@@ -118,3 +120,19 @@ def test_render_timeout():
     assert render.render_timeout(0) == 90
     assert render.render_timeout(100) == 290
     assert render.render_timeout(100000) == 1200
+
+
+def test_tiny_wav_is_error(env, monkeypatch):
+    fake, _ = env
+    monkeypatch.setenv("FAKE_FL_MODE", "tiny")
+    with pytest.raises(ToolError, match="no audio file"):
+        render.render_wav(b"x", "s", 30, binary=fake)
+
+
+def test_lock_released_after_failure(env, monkeypatch):
+    fake, _ = env
+    monkeypatch.setenv("FAKE_FL_MODE", "none")
+    with pytest.raises(ToolError):
+        render.render_wav(b"x", "s", 30, binary=fake)
+    monkeypatch.setenv("FAKE_FL_MODE", "ok")
+    assert render.render_wav(b"x", "s", 30, binary=fake).exists()

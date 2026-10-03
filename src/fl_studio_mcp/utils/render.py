@@ -21,6 +21,7 @@ from pathlib import Path
 from fastmcp.exceptions import ToolError
 
 RENDER_KEEP = 30
+MIN_WAV_BYTES = 44  # a WAV header alone
 MIN_TIMEOUT, MAX_TIMEOUT = 90.0, 1200.0
 BINARY_ENV = "FL_STUDIO_MCP_FL_BINARY"
 RENDER_DIR_ENV = "FL_STUDIO_MCP_RENDER_DIR"
@@ -147,11 +148,30 @@ class _RenderLock:
             _thread_lock.release()
 
 
-def _purge(directory: Path) -> None:
-    wavs = sorted(
-        directory.glob("*.wav"), key=lambda p: p.stat().st_mtime, reverse=True
-    )
+def _stop(proc: subprocess.Popen) -> None:
+    """Kill the child if it is still running and reap it."""
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _purge(directory: Path, keep: Path | None = None) -> None:
+    def mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    wavs = sorted(directory.glob("*.wav"), key=mtime, reverse=True)
     for old in wavs[RENDER_KEEP:]:
+        if keep is not None and old == keep:
+            continue
         try:
             old.unlink()
         except OSError:
@@ -179,17 +199,19 @@ def render_wav(
             except OSError as e:
                 raise ToolError(f"Could not launch FL Studio ({binary}): {e}") from e
             try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                raise ToolError(
-                    f"FL Studio did not finish rendering within {timeout:g} s and "
-                    "was stopped. It may be waiting on a dialog (missing plugin, "
-                    "demo limitation); open the project in FL to check."
-                ) from None
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    _stop(proc)
+                    raise ToolError(
+                        f"FL Studio did not finish rendering within {timeout:g} s and "
+                        "was stopped. It may be waiting on a dialog (missing plugin, "
+                        "demo limitation); open the project in FL to check."
+                    ) from None
+            finally:
+                _stop(proc)
             wav = work / f"{name}.wav"
-            if not wav.exists():
+            if not wav.exists() or wav.stat().st_size < MIN_WAV_BYTES:
                 raise ToolError(
                     f"FL Studio wrote no audio file (exit code {proc.returncode}). "
                     "Another render may have been running, or the project could "
@@ -204,5 +226,5 @@ def render_wav(
             shutil.move(str(wav), str(dest))
         finally:
             shutil.rmtree(work, ignore_errors=True)
-        _purge(out_dir)
+        _purge(out_dir, keep=dest)
         return dest
