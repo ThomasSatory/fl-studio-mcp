@@ -100,23 +100,28 @@ def section_bounds(project: Project, tempo: float | None = None) -> list[dict]:
 
 def _used_and_buses(routes: dict[int, set[int]], channel_targets: list[int],
                     last_insert: int) -> tuple[set[int], set[int]]:
-    """Inserts fed by a channel, and buses: inserts fed by another used insert
-    and by no channel directly (a send to a track that has its own channel,
-    e.g. a sidechain, does not make it a bus)."""
+    """Inserts fed by a channel, and buses.
+
+    Used inserts are those fed by a channel plus every insert their signal
+    reaches. A bus is an insert (not Master, not the last one) that receives
+    routes from at least two used inserts, whether or not a channel also
+    plays into it; a single send or sidechain destination is not a bus.
+    """
     direct = {t for t in channel_targets if 1 <= t < last_insert}
     used = set(direct)
-    buses: set[int] = set()
     stack = list(direct)
     while stack:
         source = stack.pop()
         for dest in routes.get(source, ()):
-            if dest == source or not 1 <= dest < last_insert:
-                continue
-            if dest not in direct:
-                buses.add(dest)
-            if dest not in used:
+            if 1 <= dest < last_insert and dest not in used:
                 used.add(dest)
                 stack.append(dest)
+    feeders: dict[int, set[int]] = {}
+    for source in used:
+        for dest in routes.get(source, ()):
+            if dest != source and 1 <= dest < last_insert:
+                feeders.setdefault(dest, set()).add(source)
+    buses = {dest for dest, sources in feeders.items() if len(sources) >= 2}
     return direct, buses
 
 
@@ -126,8 +131,9 @@ def resolve_stems(spec: Any, routes: dict[int, set[int]], channel_targets: list[
 
     spec: None (no stems), a list of insert numbers (1 .. last_insert - 1),
     "all" (every insert fed by a channel, plus buses) or "buses" (inserts
-    fed by another used insert and by no channel). A send or sidechain
-    target fed by no channel still counts as a bus. At most MAX_STEMS per call.
+    receiving routes from at least two used inserts, see _used_and_buses;
+    a single send or sidechain target is not a bus). channel_targets should
+    leave out automation-clip channels. At most MAX_STEMS per call.
     """
     if spec is None:
         return []
@@ -241,6 +247,10 @@ def register_render_tools(mcp: FastMCP) -> None:
                 stems_refused = "the project file has no mixer inserts to render alone"
             else:
                 channels = run(conn, "channels.getAll").get("channels", [])
+                automation = {a.channel for a in flp.automation_clips(project)}
+                channels = [c for c in channels
+                            if c.get("type") != "automation_clip"
+                            and c.get("index") not in automation]
                 targets = resolve_stems(
                     stems, flp.mixer_routes(project),
                     [int(c.get("target_fx_track") or 0) for c in channels],
@@ -320,13 +330,8 @@ def register_render_tools(mcp: FastMCP) -> None:
                                       if mix_energy > 0 else None)
                 # Master and the last insert ('Current') are never disabled.
                 last = flp.insert_count(project) - 1
-                automation = {a.channel for a in flp.automation_clips(project)}
-                always = [
-                    c for c in channels
-                    if int(c.get("target_fx_track") or 0) in (0, last)
-                    and c.get("type") != "automation_clip"
-                    and c.get("index") not in automation
-                ]
+                always = [c for c in channels
+                          if int(c.get("target_fx_track") or 0) in (0, last)]
                 if always:
                     who = ", ".join(str(c.get("name") or f"channel {c.get('index')}")
                                     for c in always)

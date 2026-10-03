@@ -87,8 +87,8 @@ def test_sections_in_three_four():
 
 # ------------------------------------------------------------------ stems
 
-# 0 Master, 1 Kick -> 0, 2 Bass -> 3, 3 Bass bus -> 0, 4 'Current'
-ROUTES = {0: set(), 1: {0}, 2: {3}, 3: {0}, 4: {0}}
+# 0 Master, 1 Kick -> 3, 2 Bass -> 3, 3 Bass bus -> 0, 4 'Current'
+ROUTES = {0: set(), 1: {3}, 2: {3}, 3: {0}, 4: {0}}
 LAST = 4
 
 
@@ -109,11 +109,18 @@ def test_resolve_all_and_buses():
         render_tool.resolve_stems("drums", ROUTES, [1, 2], LAST)
 
 
-def test_buses_ignore_send_targets_fed_by_a_channel():
-    # 1 (Kick) sends to 2 (Pad, has its own channel) and to 3 (fed by no channel)
-    routes = {0: set(), 1: {0, 2, 3}, 2: {0}, 3: {0}, 4: {0}}
-    assert render_tool.resolve_stems("buses", routes, [1, 2], LAST) == [3]
-    assert render_tool.resolve_stems("all", routes, [1, 2], LAST) == [1, 2, 3]
+def test_a_bus_needs_two_used_inputs_even_if_a_channel_feeds_it():
+    # 1 is a bus fed by 3, 4 and a channel; 3 sends once to 5 (sidechain/send)
+    routes = {0: set(), 1: {0}, 3: {1, 5}, 4: {1}, 5: {0}, 6: {0}}
+    assert render_tool.resolve_stems("buses", routes, [1, 3, 4], 6) == [1]
+    assert render_tool.resolve_stems("all", routes, [1, 3, 4], 6) == [1, 3, 4]
+    # a bus of buses: 1 and 2 (each fed twice) both feed 3
+    routes = {0: set(), 1: {3}, 2: {3}, 3: {0}, 4: {1}, 5: {1}, 6: {2}, 7: {2}, 8: {0}}
+    assert render_tool.resolve_stems("buses", routes, [4, 5, 6, 7], 8) == [1, 2, 3]
+    # a single send destination fed by no channel is not a bus either
+    routes = {0: set(), 1: {0, 2}, 2: {0}, 3: {0}}
+    with pytest.raises(ToolError, match="matches no mixer track"):
+        render_tool.resolve_stems("buses", routes, [1], 3)
 
 
 def test_resolve_too_many_stems():
@@ -241,10 +248,10 @@ def test_render_mix_with_stems(tool):
     assert [r["name"] for r in renders] == [
         "My Song", "My Song - stem 1 Kick", "My Song - stem 2 Bass",
         "My Song - stem 3 Bass bus"]
-    # Kick's stem keeps Master, Kick and 'Current'; Bass's keeps its bus.
-    assert enabled(renders[1]["data"]) == [0, 1, 4]
+    # Each source stem keeps the bus it feeds; the bus stem keeps both sources.
+    assert enabled(renders[1]["data"]) == [0, 1, 3, 4]
     assert enabled(renders[2]["data"]) == [0, 2, 3, 4]
-    assert enabled(renders[3]["data"]) == [0, 2, 3, 4]
+    assert enabled(renders[3]["data"]) == [0, 1, 2, 3, 4]
     stems = result["stems"]
     assert [(s["track"], s["name"]) for s in stems] == [
         (1, "Kick"), (2, "Bass"), (3, "Bass bus")]
