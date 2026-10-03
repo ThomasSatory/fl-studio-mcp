@@ -526,7 +526,7 @@ def test_a_render_that_cannot_clean_recent_files_still_succeeds(env, monkeypatch
 def test_files_that_could_not_be_put_back_are_reported_on_stderr(env, monkeypatch, capsys):
     fake, _ = env
 
-    def restore(snap, failed=None):
+    def restore(snap, failed=None, since=None):
         failed.append(Path("/fl/reg.xml"))
         return []
 
@@ -539,7 +539,7 @@ def test_files_that_could_not_be_put_back_are_reported_on_stderr(env, monkeypatc
     assert problems == [Path("/fl/reg.xml")]
     # Each render reports into its caller's list: nothing is kept between calls.
     other: list[Path] = []
-    monkeypatch.setattr(render, "restore_shared_files", lambda snap, failed=None: [])
+    monkeypatch.setattr(render, "restore_shared_files", lambda snap, failed=None, since=None: [])
     assert render.render_wav(b"x", "s", 30, binary=fake, problems=other).exists()
     assert other == [] and problems == [Path("/fl/reg.xml")]
 
@@ -661,7 +661,7 @@ def test_a_snapshot_whose_restore_fails_is_kept_for_the_next_try(shared, monkeyp
     try:
         _leave_a_pending_render(shared, work)
 
-        def boom(snap, failed=None):
+        def boom(snap, failed=None, since=None):
             raise RuntimeError("disk gone")
 
         monkeypatch.setattr(render, "restore_shared_files", boom)
@@ -768,3 +768,147 @@ def test_sigterm_mid_render_stops_the_renderer_and_puts_the_files_back(env, shar
     assert _gone(manifest["renderer_pid"])
     _assert_restored(shared)
     assert not Path(manifest["work"]).exists() and render.load_pending() is None
+
+
+# --- Re-review: real server exit, stale snapshots, other settings, unknown PID ---
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_the_real_server_exits_at_once_on_a_signal_with_stdin_open(tmp_path, signame):
+    import json
+    import signal
+    import subprocess
+
+    sig = getattr(signal, signame)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home)}
+    env.pop("FL_STUDIO_MCP_SETTINGS_DIR", None)
+    env.pop("FL_STUDIO_MCP_RENDER_DIR", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "from fl_studio_mcp import server; server.main()"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    try:
+        hello = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"}}}
+        proc.stdin.write((json.dumps(hello) + "\n").encode())
+        proc.stdin.flush()
+        assert b'"result"' in proc.stdout.readline()  # the stdio loop is running
+        sent = time.monotonic()
+        proc.send_signal(sig)  # stdin stays open, like a client that only signals
+        assert proc.wait(timeout=5) == 128 + sig
+        assert time.monotonic() - sent < 5
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+def test_a_stale_snapshot_is_discarded_not_put_back(shared, capsys):
+    work = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    snap = render.snapshot_shared_files()
+    render.save_pending(snap, work, time.time() - render.RECOVER_MAX_AGE - 60)
+    # Days of the user's own changes since.
+    (shared / "Recent files.scr").write_text("a week of projects")
+    (shared / "Mapping" / "My curve.env").write_text("user curve")
+    render.recover_at_startup()
+    assert (shared / "Recent files.scr").read_text() == "a week of projects"
+    assert (shared / "Mapping" / "My curve.env").read_text() == "user curve"
+    assert render.load_pending() is None and not work.exists()
+    assert "too old to put back" in capsys.readouterr().err
+
+
+def test_files_untouched_since_the_snapshot_are_never_restored_or_deleted(shared):
+    work = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    created = time.time()
+    render.save_pending(render.snapshot_shared_files(), work, created)
+    before = created - 600  # written before the snapshot: not the renderer's
+    (shared / "Recent files.scr").write_text("other bytes, older date")
+    os.utime(shared / "Recent files.scr", (before, before))
+    (shared / "Mapping" / "Old curve.env").write_text("older than the snapshot")
+    os.utime(shared / "Mapping" / "Old curve.env", (before, before))
+    (shared / "reg.xml").write_text("render instance")  # the renderer's write: reverted
+    (shared / "Mapping" / "Vel curve 2.env").write_text("new")  # the renderer's: deleted
+    render.recover_at_startup()
+    assert (shared / "Recent files.scr").read_text() == "other bytes, older date"
+    assert (shared / "Mapping" / "Old curve.env").exists()
+    assert (shared / "reg.xml").read_text() == "user settings"
+    assert not (shared / "Mapping" / "Vel curve 2.env").exists()
+
+
+def test_the_post_render_restore_still_reverts_every_renderer_write(tmp_path, monkeypatch):
+    folder = tmp_path / "s"
+    folder.mkdir()
+    (folder / "a").write_text("x")
+    (folder / "gone").write_text("kept")
+    monkeypatch.setattr(render, "shared_fl_files",
+                        lambda: [(folder, "a"), (folder, "gone"), (folder, "*.env")])
+    taken = time.time()
+    snap = render.snapshot_shared_files()
+    (folder / "a").write_text("renderer")
+    (folder / "gone").unlink()  # deleted by the renderer: put back
+    (folder / "b.env").write_text("renderer")
+    assert sorted(p.name for p in render.restore_shared_files(snap, since=taken)) == [
+        "a", "b.env", "gone"]
+    assert (folder / "a").read_text() == "x" and (folder / "gone").read_text() == "kept"
+    assert not (folder / "b.env").exists()
+
+
+def test_recovery_sweeps_the_recorded_folders_not_its_own_settings(tmp_path, monkeypatch,
+                                                                   capsys):
+    # Server A (default settings) died mid-render; server B, configured with
+    # another settings folder, recovers its snapshot.
+    a, b = tmp_path / "A" / "Mapping", tmp_path / "B" / "Mapping"
+    for folder in (a, b):
+        folder.mkdir(parents=True)
+        (folder / "Default.env").write_text("default")
+    monkeypatch.setenv("FL_STUDIO_MCP_SETTINGS_DIR", str(tmp_path / "A"))
+    monkeypatch.setattr(render, "shared_fl_files", lambda: [(a, "*.env")])
+    work = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    render.save_pending(render.snapshot_shared_files(), work)
+    (a / "Vel curve 2.env").write_text("the renderer's")
+    (b / "B curve.env").write_text("B's own")
+    monkeypatch.setenv("FL_STUDIO_MCP_SETTINGS_DIR", str(tmp_path / "B"))
+    monkeypatch.setattr(render, "shared_fl_files", lambda: [(b, "*.env")])
+    render.recover_at_startup()
+    assert sorted(p.name for p in b.iterdir()) == ["B curve.env", "Default.env"]
+    assert sorted(p.name for p in a.iterdir()) == ["Default.env"]
+    assert "those files are put back" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="ps")
+def test_a_renderer_whose_pid_was_never_recorded_is_found_and_stopped(shared):
+    import subprocess
+
+    work = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    _leave_a_pending_render(shared, work)
+    assert render.load_pending()[1]["renderer_pid"] is None
+    orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                               str(work / "s.flp")])
+    try:
+        render.recover_at_startup()
+        assert orphan.wait(timeout=10) == -9
+        _assert_restored(shared)
+        assert render.load_pending() is None and not work.exists()
+    finally:
+        if orphan.poll() is None:
+            orphan.kill()
+        orphan.wait()
+
+
+def test_recovery_waits_while_a_renderer_cannot_be_stopped(shared, monkeypatch, capsys):
+    work = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    try:
+        _leave_a_pending_render(shared, work)
+        monkeypatch.setattr(render, "_processes_running_in", lambda w: [999_999_999])
+        render.recover_at_startup()
+        assert (shared / "reg.xml").read_text() == "render instance"  # untouched
+        assert render.load_pending() is not None and work.exists()
+        assert "still runs" in capsys.readouterr().err
+    finally:
+        shutil.rmtree(work, ignore_errors=True)

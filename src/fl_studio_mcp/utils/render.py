@@ -20,12 +20,15 @@ them. A file that could not be read before the render is left alone; a file
 that could not be put back is reported on stderr (never stdout: the server
 talks MCP over it) and in the render's notes (render_wav's `problems`).
 
-The snapshot is also written to the cache folder (pending-restore) before
-the renderer starts, and removed once the files are back: when the server
-dies mid-render, the next render (or the next server start) kills the
-orphaned renderer and puts the files back from it. SIGTERM/SIGHUP and the
-interpreter's exit stop a running renderer, so that the render's own
-cleanup runs.
+Only a file written after the snapshot is put back or deleted: a file
+untouched since is never rewritten. The snapshot is also written to the
+cache folder (pending-restore), with the folders it sweeps, before the
+renderer starts, and removed once the files are back: when the server dies
+mid-render, the next render (or the next server start) kills the orphaned
+renderer (found by its temp folder) and puts the files back from it, unless
+the snapshot is older than RECOVER_MAX_AGE (then it is discarded).
+SIGTERM/SIGHUP stop a running renderer, put the files back and exit at once;
+so does the interpreter's exit.
 
 Before that guard, each render also added its temp project
 (.../flmcp-render-XXXX/<name>.flp) to FL's recent files, pushing the user's
@@ -80,6 +83,12 @@ RENDER_NAME = re.compile(r" \d{4}-\d{2}-\d{2} \d{2}h\d{2}m\d{2}(-\d+)?\.wav$")
 LOCK_FILE = "render.lock"
 PENDING_DIR = "pending-restore"
 MANIFEST = "manifest.json"
+# A file whose mtime is this close before the snapshot still counts as written
+# after it (file systems with coarse timestamps).
+MTIME_SLACK = 2.0
+# A leftover snapshot older than this is discarded, not put back: the longest
+# render (MAX_TIMEOUT) plus a margin; after that FL has saved its own settings.
+RECOVER_MAX_AGE = MAX_TIMEOUT + 600.0
 # Leftover render temp folders (a server killed mid-render) older than this go.
 TEMP_MAX_AGE = 3600.0
 
@@ -178,27 +187,52 @@ def write_atomic(path: Path, data: bytes) -> None:
             fh.write(data)
 
 
-def restore_shared_files(snap: Snapshot, failed: list[Path] | None = None) -> list[Path]:
+def _is_pattern(path: Path) -> bool:
+    return any(ch in path.name for ch in "*?[")
+
+
+def _written_since(path: Path, since: float | None) -> bool:
+    """Whether `path` was written at or after `since` (always True without `since`)."""
+    if since is None:
+        return True
+    try:
+        return path.stat().st_mtime >= since - MTIME_SLACK
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # cannot tell: compare the bytes as before
+
+
+def restore_shared_files(snap: Snapshot, failed: list[Path] | None = None,
+                         since: float | None = None) -> list[Path]:
     """Put back every shared file whose bytes changed since `snap`; returns them.
 
     A file that did not exist before (or a new match of a guarded pattern)
-    is deleted; one that could not be read then is skipped. Files that could
-    not be put back are appended to `failed`. Nothing is printed here.
+    is deleted; one that could not be read then is skipped. The patterns
+    swept are the ones recorded in `snap` (its pattern keys), never the
+    current settings folder's. With `since` (when the snapshot was taken), a
+    file last written before it is never touched: only what was written
+    after the snapshot (the renderer) is reverted. Files that could not be
+    put back are appended to `failed`. Nothing is printed here.
     """
     changed: list[Path] = []
     failed = [] if failed is None else failed
-    for folder, pattern in shared_fl_files():
-        if any(ch in pattern for ch in "*?[") and folder.is_dir():
-            for path in folder.glob(pattern):
-                if path not in snap:
-                    try:
-                        path.unlink()
-                        changed.append(path)
-                    except OSError:
-                        failed.append(path)
-    for path, saved in snap.items():
-        if any(ch in path.name for ch in "*?[") or saved == UNREADABLE:
+    for marker in [p for p in snap if _is_pattern(p)]:
+        folder = marker.parent
+        if not folder.is_dir():
             continue
+        for path in folder.glob(marker.name):
+            if path not in snap and _written_since(path, since):
+                try:
+                    path.unlink()
+                    changed.append(path)
+                except OSError:
+                    failed.append(path)
+    for path, saved in snap.items():
+        if _is_pattern(path) or saved == UNREADABLE:
+            continue
+        if path.exists() and not _written_since(path, since):
+            continue  # untouched since the snapshot (a file deleted since is put back)
         try:
             current = path.read_bytes() if path.exists() else None
         except OSError:
@@ -484,16 +518,18 @@ def _run_renderer(binary: Path, flp: Path, timeout: float, on_start=None) -> int
     return proc.returncode
 
 
-def _after_render(shared: Snapshot, work: Path, problems: list[Path] | None = None) -> None:
+def _after_render(shared: Snapshot, work: Path, problems: list[Path] | None = None,
+                  since: float | None = None) -> None:
     """Put back FL's shared files and clean its recent files; never raises.
 
-    Files that could not be put back are appended to `problems` (and noted on
-    stderr). The pending snapshot on disk goes once the restore has run.
+    Only files written since `since` (the snapshot) are put back. Files that
+    could not be are appended to `problems` (and noted on stderr). The
+    pending snapshot on disk goes once the restore has run.
     """
     failed: list[Path] = []
     restored = False
     try:
-        restore_shared_files(shared, failed)
+        restore_shared_files(shared, failed, since)
         restored = True
     except Exception as e:  # noqa: BLE001 - a render must not fail on this
         _stderr(f"could not put back FL's shared files after a render: {e}")
@@ -518,7 +554,7 @@ def _finish(state: dict, problems: list[Path] | None = None) -> None:
         if state.get("done"):
             return
         state["done"] = True
-        _after_render(state["snapshot"], state["work"], problems)
+        _after_render(state["snapshot"], state["work"], problems, state.get("since"))
     finally:
         _restore_lock.release()
 
@@ -530,18 +566,23 @@ def _pending_dir() -> Path:
     return cache.cache_dir() / PENDING_DIR
 
 
-def save_pending(snap: Snapshot, work: Path) -> dict:
+def save_pending(snap: Snapshot, work: Path, created: float | None = None) -> dict:
     """Write `snap` to the cache folder before a render; returns its manifest.
 
-    The bytes go to one file each, the manifest (written last, atomically) is
-    what makes the snapshot pending. Raises OSError.
+    `created` is when the snapshot was taken (default: now). The swept
+    patterns and the settings folder are recorded with it, so a server
+    configured with another settings folder puts back these paths, not its
+    own. The bytes go to one file each, the manifest (written last,
+    atomically) is what makes the snapshot pending. Raises OSError.
     """
     folder = _pending_dir()
     shutil.rmtree(folder, ignore_errors=True)
     folder.mkdir(parents=True)
     entries = []
     for n, (path, saved) in enumerate(snap.items()):
-        if saved is None:
+        if _is_pattern(path):
+            entries.append({"path": str(path), "state": "pattern"})
+        elif saved is None:
             entries.append({"path": str(path), "state": "missing"})
         elif saved == UNREADABLE:
             entries.append({"path": str(path), "state": UNREADABLE})
@@ -551,8 +592,13 @@ def save_pending(snap: Snapshot, work: Path) -> dict:
             (folder / blob).write_bytes(data)
             entries.append({"path": str(path), "state": "file", "blob": blob,
                             "times": list(times)})
-    manifest = {"version": 1, "created": time.time(), "pid": os.getpid(),
-                "work": str(work), "renderer_pid": None, "entries": entries}
+    try:
+        settings = str(get_fl_settings_base())
+    except Exception:  # noqa: BLE001 - informative only
+        settings = None
+    manifest = {"version": 2, "created": time.time() if created is None else created,
+                "pid": os.getpid(), "work": str(work), "renderer_pid": None,
+                "settings": settings, "entries": entries}
     _write_manifest(manifest)
     return manifest
 
@@ -566,10 +612,11 @@ def load_pending() -> tuple[Snapshot, dict] | None:
     folder = _pending_dir()
     try:
         manifest = json.loads((folder / MANIFEST).read_text(encoding="utf-8"))
+        float(manifest["created"])
         snap: Snapshot = {}
         for entry in manifest["entries"]:
             path = Path(entry["path"])
-            if entry["state"] == "missing":
+            if entry["state"] in ("missing", "pattern"):
                 snap[path] = None
             elif entry["state"] == "file":
                 try:
@@ -598,35 +645,52 @@ def clear_pending() -> None:
     shutil.rmtree(folder, ignore_errors=True)
 
 
-def _stop_orphan(pid: object, work: str | None) -> None:
-    """Kill a renderer left running by a server that died (POSIX), if it is one."""
-    if not isinstance(pid, int) or not work or pid == os.getpid() or os.name == "nt":
-        return
-    if not cache.pid_alive(pid):
-        return
+def _processes_running_in(work: str) -> list[int]:
+    """PIDs (other than this one) whose command line holds `work` (POSIX, via ps)."""
     try:
-        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
-                                 capture_output=True, text=True, timeout=3).stdout
+        out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True,
+                             text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
-        return
-    if work not in command:
-        return  # the pid now belongs to another process
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except OSError:
-        return
+        return []
+    pids = []
+    for line in out.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if work in command and pid.isdigit() and int(pid) != os.getpid():
+            pids.append(int(pid))
+    return pids
+
+
+def _stop_orphans(work: str | None) -> bool:
+    """Kill renderers left running in `work` by a server that died; False if one survives.
+
+    A renderer is found by its command line, which holds the temp project
+    (`work` is unique: mkdtemp), whether or not its PID made it to the
+    manifest; a recorded PID now used by another process is never killed.
+    On Windows nothing can be checked: True.
+    """
+    if not work or os.name == "nt":
+        return True
+    pids = _processes_running_in(work)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
     deadline = time.monotonic() + 10
-    while cache.pid_alive(pid) and time.monotonic() < deadline:
+    while any(cache.pid_alive(pid) for pid in pids) and time.monotonic() < deadline:
         time.sleep(0.05)
+    return not _processes_running_in(work)
 
 
 def recover_pending(problems: list[Path] | None = None) -> bool:
     """Put back the shared files of a render whose server died; True if there was one.
 
-    Call it holding the render lock. The orphaned renderer (if it still runs)
-    is killed first, then the files are put back as after any render, its
-    temp folder removed and the snapshot deleted. When the restore itself
-    fails, the snapshot is kept for the next try.
+    Call it holding the render lock. A snapshot older than RECOVER_MAX_AGE
+    is discarded (FL has saved its own settings since). Otherwise the
+    orphaned renderer (if it still runs) is killed first; if it cannot be,
+    the snapshot is kept for later. Then only the files written since the
+    snapshot are put back, its temp folder removed and the snapshot
+    deleted. When the restore itself fails, the snapshot is kept too.
     """
     loaded = load_pending()
     if loaded is None:
@@ -635,10 +699,25 @@ def recover_pending(problems: list[Path] | None = None) -> bool:
         return False
     snap, manifest = loaded
     work = manifest.get("work")
-    _stop_orphan(manifest.get("renderer_pid"), work)
+    created = float(manifest["created"])
+    if not _stop_orphans(work):
+        _stderr(f"a renderer of an unfinished render still runs ({work}); FL's shared "
+                "files will be put back once it has stopped")
+        return True
+    age = time.time() - created
+    if age > RECOVER_MAX_AGE:
+        _stderr(f"discarded the snapshot of FL's shared files left by an unfinished render "
+                f"{age / 60:.0f} min ago: too old to put back safely")
+        _drop_work(work)
+        clear_pending()
+        return True
+    settings = manifest.get("settings")
+    if settings and settings != str(get_fl_settings_base()):
+        _stderr(f"an unfinished render used FL's settings in {settings}: those files are "
+                "put back, not this server's")
     failed: list[Path] = []
     try:
-        changed = restore_shared_files(snap, failed)
+        changed = restore_shared_files(snap, failed, since=created)
     except Exception as e:  # noqa: BLE001 - a render must not fail on this
         _stderr(f"could not put back FL's shared files left by an unfinished render: {e}")
         return True
@@ -649,13 +728,17 @@ def recover_pending(problems: list[Path] | None = None) -> bool:
                 + ", ".join(str(p) for p in failed))
     if work:
         forget_render_paths(work)
-        if Path(work).name.startswith(TEMP_PREFIX):
-            shutil.rmtree(work, ignore_errors=True)
+    _drop_work(work)
     clear_pending()
     if changed:
         _stderr("put back FL's shared files a render left changed (its server stopped "
                 "mid-render): " + ", ".join(str(p) for p in changed))
     return True
+
+
+def _drop_work(work: str | None) -> None:
+    if work and Path(work).name.startswith(TEMP_PREFIX):
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def clean_temp_dirs(max_age: float = TEMP_MAX_AGE) -> None:
@@ -692,12 +775,12 @@ def _kill_active() -> None:
             pass
 
 
-def _at_exit() -> None:
-    """Interpreter exit: stop a running renderer and put the shared files back."""
+def _stop_and_restore() -> None:
+    """Stop a running renderer, wait for it and put the shared files back."""
     state = _active
+    _kill_active()
     if state is None:
         return
-    _kill_active()
     proc = state.get("proc")
     if proc is not None:
         try:
@@ -708,18 +791,28 @@ def _at_exit() -> None:
     shutil.rmtree(state["work"], ignore_errors=True)
 
 
+def _at_exit() -> None:
+    """Interpreter exit: stop a running renderer and put the shared files back."""
+    _stop_and_restore()
+
+
 atexit.register(_at_exit)
 
 
 def install_exit_handlers() -> None:
-    """SIGTERM/SIGHUP stop a running renderer, then exit (atexit runs); POSIX only.
+    """SIGTERM/SIGHUP: stop a running renderer, put the files back, exit at once (POSIX).
 
-    The render's thread is not a daemon: once its renderer is dead it puts
-    the shared files back itself, and the interpreter waits for it.
+    The handler exits with os._exit: raising SystemExit would leave the
+    interpreter waiting on its non-daemon worker threads (the stdio reader
+    among them) until the client closes stdin.
     """
     def handler(signum, frame):
-        _kill_active()
-        raise SystemExit(128 + signum)
+        try:
+            _stop_and_restore()
+        except BaseException as e:  # noqa: BLE001 - exit whatever happens
+            _stderr(f"could not finish a render on exit: {e}")
+        finally:
+            os._exit(128 + signum)
 
     for name in ("SIGTERM", "SIGHUP"):
         sig = getattr(signal, name, None)
@@ -753,22 +846,28 @@ def render_wav(
             flp.write_bytes(flp_data)
             wav = work / f"{name}.wav"
             for attempt in range(SIGNAL_RETRIES + 1):
+                taken = time.time()
                 shared = snapshot_shared_files()
                 try:
-                    manifest = save_pending(shared, work)
+                    manifest = save_pending(shared, work, taken)
                 except OSError as e:
                     manifest = None
                     _stderr(f"could not write the render's snapshot to disk: {e}")
-                state = {"snapshot": shared, "work": work, "proc": None, "done": False}
+                state = {"snapshot": shared, "work": work, "proc": None, "done": False,
+                         "since": taken}
 
                 def started(proc, state=state, manifest=manifest):
                     state["proc"] = proc
                     if manifest is not None:
                         manifest["renderer_pid"] = proc.pid
-                        try:
-                            _write_manifest(manifest)
-                        except OSError:
-                            pass
+                        for _ in range(2):
+                            try:
+                                _write_manifest(manifest)
+                                break
+                            except OSError as e:
+                                error = e
+                        else:  # recovery then finds the renderer by its command line
+                            _stderr(f"could not record the renderer's PID: {error}")
 
                 _active = state
                 try:
