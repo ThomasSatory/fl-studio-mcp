@@ -218,7 +218,10 @@ def _short_term_max(energy: np.ndarray, hop: int) -> float | None:
 
 
 def integrated_lufs(x: np.ndarray, rate: int) -> float | None:
-    """Integrated loudness per BS.1770-4 (None when silent or under 400 ms)."""
+    """Integrated loudness per BS.1770-4 (None when silent or under 400 ms).
+
+    Every channel is weighted 1.0 (meant for mono/stereo: no surround or LFE weighting).
+    """
     return _gated_lufs(*_hop_energy(x, rate))
 
 
@@ -241,7 +244,12 @@ def _true_peak_kernels() -> np.ndarray:
 
 
 def true_peak_dbfs(x: np.ndarray) -> float | None:
-    """Inter-sample peak by 4x oversampling (dBTP, 0.1 dB); None when silent."""
+    """Inter-sample peak by 4x oversampling (dBTP, 0.1 dB); None when silent.
+
+    A signal that starts or stops abruptly (hard cut to/from digital silence)
+    reads a little above its sample peak: that overshoot is real, a DAC or
+    lossy encoder reconstructs it too, so it is kept rather than smoothed away.
+    """
     x = _as_2d(x)
     peak = float(np.max(np.abs(x))) if x.size else 0.0
     if peak <= 0:
@@ -262,15 +270,14 @@ def band_balance(mono: np.ndarray, rate: int) -> dict[str, float]:
     """
     x = _as_2d(np.asarray(mono, dtype=np.float64))
     nfft = 1 << max(10, math.ceil(math.log2(rate / 6)))  # ~6 Hz resolution
+    size = min(nfft, len(x))  # a short segment is windowed over its own length
     frames = max(1, len(x) // nfft)
-    if len(x) < nfft:
-        x = np.pad(x, ((0, nfft - len(x)), (0, 0)))
     index = np.unique(np.linspace(0, frames - 1, min(frames, 600)).astype(int))
-    window = np.hanning(nfft)
+    window = np.hanning(size) if size > 1 else np.ones(max(size, 1))
     power = np.zeros(nfft // 2 + 1)
     for c in range(x.shape[1]):
-        segs = x[: frames * nfft, c].reshape(frames, nfft)[index]
-        power += (np.abs(np.fft.rfft(segs * window, axis=1)) ** 2).sum(axis=0)
+        segs = x[: frames * size, c].reshape(frames, size)[index]
+        power += (np.abs(np.fft.rfft(segs * window, nfft, axis=1)) ** 2).sum(axis=0)
     power[0] = 0.0  # DC is not sound
     freqs = np.fft.rfftfreq(nfft, 1 / rate)
     total = power.sum()
@@ -346,8 +353,9 @@ def _silence(x: np.ndarray, rate: int) -> dict:
     if len(loud) == 0:
         whole = round(len(x) / rate, 2)
         return {"leading_seconds": whole, "trailing_seconds": whole}
-    return {"leading_seconds": round(loud[0] / rate, 2),
-            "trailing_seconds": round((len(x) - 1 - loud[-1]) / rate, 2)}
+    first, last = int(loud[0]), int(loud[-1])
+    return {"leading_seconds": round(first / rate, 2),
+            "trailing_seconds": round((len(x) - 1 - last) / rate, 2)}
 
 
 def _mix_warnings(overall: dict, silence: dict, sections: list[dict]) -> list[str]:
@@ -384,13 +392,13 @@ def _mix_warnings(overall: dict, silence: dict, sections: list[dict]) -> list[st
             w.append(f"dull, little top end: only {top}% of the energy is above 2 kHz")
     if silence["leading_seconds"] > 2:
         w.append(f"{silence['leading_seconds']} s of silence before the music starts")
-    levels = [s["lufs"] for s in sections if s.get("lufs") is not None]
-    if len(levels) >= 2:
-        median = float(np.median(levels))
-        for s in sections:
-            if s.get("lufs") is None:
-                continue
-            gap = s["lufs"] - median
+    live = [s for s in sections if s.get("lufs") is not None]
+    if len(live) >= 2:
+        for i, s in enumerate(live):
+            # Compare with the others only: with two sections, including the
+            # section itself would halve any jump between them.
+            others = [o["lufs"] for j, o in enumerate(live) if j != i]
+            gap = s["lufs"] - float(np.median(others))
             if abs(gap) > 8:
                 side = "louder" if gap > 0 else "quieter"
                 w.append(f"section {s['name']} is {round(abs(gap), 1)} LU {side} "
@@ -414,11 +422,17 @@ def analyze_mix(path: Path, sections: list[dict] | None = None) -> dict:
     duration = len(x) / rate
     out_sections = []
     for i, sec in enumerate(sections or []):
+        if not isinstance(sec, dict):
+            raise ToolError(f"section {i} must be an object with name, start_seconds, "
+                            "end_seconds")
         try:
-            start = max(0.0, float(sec.get("start_seconds", 0.0)))
-            end = min(duration, float(sec.get("end_seconds", duration)))
+            start = float(sec.get("start_seconds", 0.0))
+            end = float(sec.get("end_seconds", duration))
         except (TypeError, ValueError) as exc:
             raise ToolError(f"section {i}: start_seconds/end_seconds must be numbers") from exc
+        if not (math.isfinite(start) and math.isfinite(end)):
+            raise ToolError(f"section {i}: start_seconds/end_seconds must be finite")
+        start, end = max(0.0, start), min(duration, end)
         a, b = int(round(start * rate)), int(round(end * rate))
         if b <= a:
             continue

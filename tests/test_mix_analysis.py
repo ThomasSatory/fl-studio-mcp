@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import struct
 import time
 
@@ -174,6 +176,12 @@ def test_band_balance_of_out_of_phase_stereo_is_not_cancelled():
     assert bands["sub"] > 90
 
 
+def test_band_balance_of_short_segment_is_not_zeroed():
+    bands = ma.band_balance(sine(1000, 0.04, 0.5), RATE)  # 1920 samples < nfft
+    assert bands["low_mid"] > 90
+    assert sum(bands.values()) == pytest.approx(100, abs=0.5)
+
+
 def test_stereo_image():
     s = sine(500, 1, 0.5)
     assert ma.stereo_image(np.stack([s, -s], axis=1))["correlation"] == pytest.approx(-1)
@@ -252,6 +260,64 @@ def test_analyze_mix_tonal_warnings(tmp_path):
     assert "bass-heavy" in text
     assert "dull" in text
     assert "correlation" in text
+
+
+def test_analyze_mix_two_sections_jump_warns(tmp_path):
+    quiet = 10 ** (-30 / 20)
+    x = stereo(np.concatenate([sine(1000, 3, quiet), sine(1000, 3, quiet * 4)]))
+    sections = [{"name": "verse", "start_seconds": 0, "end_seconds": 3},
+                {"name": "chorus", "start_seconds": 3, "end_seconds": 6}]
+    warnings = ma.analyze_mix(write_wav(tmp_path / "m.wav", x), sections)["warnings"]
+    assert any("section chorus is 12.0 LU louder" in w for w in warnings)
+    assert any("section verse is 12.0 LU quieter" in w for w in warnings)
+
+
+@pytest.mark.parametrize("bad", [
+    {"name": "a", "start_seconds": float("nan"), "end_seconds": 1},
+    {"name": "a", "start_seconds": 0, "end_seconds": float("inf")},
+    {"name": "a", "start_seconds": "soon", "end_seconds": 1},
+    "intro",
+])
+def test_analyze_mix_rejects_bad_sections(tmp_path, bad):
+    path = write_wav(tmp_path / "m.wav", stereo(sine(1000, 1, 0.3)))
+    with pytest.raises(ToolError):
+        ma.analyze_mix(path, [bad])
+
+
+def _assert_plain(value, where="result"):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            assert type(k) is str, f"{where}: key {k!r}"
+            _assert_plain(v, f"{where}.{k}")
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _assert_plain(v, f"{where}[{i}]")
+    else:
+        assert value is None or type(value) in (str, int, float, bool), \
+            f"{where}: {type(value).__name__}"
+        if type(value) is float:
+            assert math.isfinite(value), where
+
+
+@pytest.mark.parametrize("signal", ["music", "silent"])
+def test_outputs_are_plain_json(tmp_path, signal):
+    if signal == "silent":
+        x = np.zeros((2 * RATE, 2))
+    else:
+        x = stereo(np.concatenate([np.zeros(RATE), sine(100, 2, 0.5) + sine(5000, 2, 0.2),
+                                   np.zeros(RATE // 2)]))
+        x[RATE + 10, 0] = 1.5
+    sections = [{"name": "a", "start_seconds": 0, "end_seconds": 2, "start_bar": 1},
+                {"name": "b", "start_seconds": 2, "end_seconds": 3.5, "end_bar": 9}]
+    result = ma.analyze_mix(write_wav(tmp_path / "m.wav", x), sections)
+    _assert_plain(result)
+    json.dumps(result, allow_nan=False)
+    segment = ma.analyze_segment(x, RATE)
+    _assert_plain(segment)
+    json.dumps(segment, allow_nan=False)
+    stems = [{"track": 1, "name": "kick", "lufs": -10.0, "bands": {"sub": 60}, "silent": False},
+             {"track": 2, "name": "808", "lufs": -11.0, "bands": {"sub": 70}, "silent": False}]
+    _assert_plain(ma.compare_stems(stems))
 
 
 # ------------------------------------------------------------------- stems
