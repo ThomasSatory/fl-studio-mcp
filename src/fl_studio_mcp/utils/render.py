@@ -12,7 +12,9 @@ note colour presets, velocity curves), and the FL Studio the user works in
 then crashed at its next save (EAccessViolation in FLEngine, 4 runs in 5
 live; none in 6 with the guard). So the bytes of those files are taken
 before each render and every file the render changed is put back (deleted
-if it did not exist) as soon as the render process has exited. Whatever the
+if it did not exist) as soon as the render process has exited, through a
+temp file and a rename, with its date; a file whose bytes the renderer
+rewrote unchanged gets its date back too. Whatever the
 main FL writes to those few files while a render runs is reverted with
 them. A file that could not be read before the render is left alone; a file
 that could not be put back is reported on stderr (never stdout: the server
@@ -31,6 +33,7 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -104,14 +107,50 @@ def snapshot_shared_files() -> Snapshot:
         else:
             paths = [folder / pattern]
         for path in paths:
-            try:
-                st = path.stat()
-                snap[path] = (path.read_bytes(), (st.st_atime_ns, st.st_mtime_ns))
-            except FileNotFoundError:
-                snap[path] = None
-            except OSError:
-                snap[path] = UNREADABLE  # exists (maybe): never deleted nor rewritten
+            snap[path] = _snapshot_one(path)
     return snap
+
+
+def _snapshot_one(path: Path) -> tuple[bytes, tuple[int, int]] | str | None:
+    for attempt in range(2):
+        try:
+            st = path.stat()
+            return (path.read_bytes(), (st.st_atime_ns, st.st_mtime_ns))
+        except FileNotFoundError:
+            if attempt == 0:
+                continue  # look once more (a file being replaced) before saying "missing"
+            return None
+        except OSError:
+            return UNREADABLE  # exists (maybe): never deleted nor rewritten
+    return None
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    """Write `data` to `path` through a temp file next to it and os.replace.
+
+    The file's mode is kept. Writing the temp file failing leaves `path`
+    untouched (OSError raised); when only the replace fails (Windows: FL holds
+    the file), the bytes are written in place instead.
+    """
+    tmp = path.with_name(path.name + ".flmcp-tmp")
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        mode = None
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        if mode is not None:
+            os.chmod(tmp, mode)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
 
 
 def restore_shared_files(snap: Snapshot, failed: list[Path] | None = None) -> list[Path]:
@@ -150,10 +189,15 @@ def restore_shared_files(snap: Snapshot, failed: list[Path] | None = None) -> li
             continue
         data, times = saved
         if current == data:
+            # Same bytes, but the renderer may have rewritten them: put the date back.
+            try:
+                if path.stat().st_mtime_ns != times[1]:
+                    os.utime(path, ns=times)
+            except OSError:
+                failed.append(path)
             continue
         try:
-            with open(path, "wb") as fh:  # in place: the user's FL may hold it open
-                fh.write(data)
+            write_atomic(path, data)
             os.utime(path, ns=times)
             changed.append(path)
         except OSError:
@@ -185,40 +229,39 @@ def _recent_files_paths() -> list[Path]:
     return [folder / pattern for folder, pattern in shared_fl_files() if pattern == RECENT_FILES]
 
 
-def forget_render_paths(extra: list[str] | None = None) -> int:
+def _without_render_paths(raw: bytes, markers: list[str]) -> tuple[bytes, int]:
+    """`raw` (FL's recent files) without the lines holding a marker; BOM and order kept."""
+    bom = raw.startswith(UTF8_BOM)
+    text = (raw[len(UTF8_BOM):] if bom else raw).decode("utf-8", "surrogateescape")
+    lines = text.splitlines(keepends=True)
+    kept = [line for line in lines if not any(m in line for m in markers)]
+    data = (UTF8_BOM if bom else b"") + "".join(kept).encode("utf-8", "surrogateescape")
+    return data, len(lines) - len(kept)
+
+
+def forget_render_paths(work: Path | str | None = None) -> int:
     """Drop the render's temp projects from FL's recent files; returns the lines removed.
 
-    A line goes when it holds the render temp folder prefix or the renders
-    folder (or a string of `extra`). The BOM, the order and every other line
-    are kept, and the file is only rewritten when a line went. Never raises:
-    a problem is noted on stderr.
+    A line goes when it holds the render temp folder prefix (TEMP_PREFIX) or
+    `work`, this render's folder; never the renders folder, which the user may
+    point at a project folder. The BOM, the order and every other line are
+    kept; the file is re-read just before writing and only rewritten when a
+    line went. Never raises: a problem is noted on stderr.
     """
-    markers = [TEMP_PREFIX, *(extra or [])]
-    try:
-        markers.append(str(renders_dir()))
-    except OSError:
-        pass
+    markers = [TEMP_PREFIX] + ([str(work)] if work else [])
     removed = 0
     for path in _recent_files_paths():
         try:
-            raw = path.read_bytes()
+            _, count = _without_render_paths(path.read_bytes(), markers)
+            if not count:
+                continue
+            # FL may have written it meanwhile: filter what is there now.
+            data, count = _without_render_paths(path.read_bytes(), markers)
+            if count:
+                write_atomic(path, data)
+                removed += count
         except FileNotFoundError:
             continue
-        except OSError as e:
-            _stderr(f"could not read {path} to remove render paths: {e}")
-            continue
-        try:
-            bom = raw.startswith(UTF8_BOM)
-            text = raw[len(UTF8_BOM):].decode("utf-8", "surrogateescape") if bom else \
-                raw.decode("utf-8", "surrogateescape")
-            lines = text.splitlines(keepends=True)
-            kept = [line for line in lines if not any(m in line for m in markers)]
-            if len(kept) == len(lines):
-                continue
-            data = (UTF8_BOM if bom else b"") + "".join(kept).encode("utf-8", "surrogateescape")
-            with open(path, "wb") as fh:  # in place: the user's FL may hold it open
-                fh.write(data)
-            removed += len(lines) - len(kept)
         except (OSError, ValueError) as e:
             _stderr(f"could not remove render paths from {path}: {e}")
     return removed
@@ -422,7 +465,7 @@ def _after_render(shared: Snapshot, work: Path) -> None:
         _restore_problems.extend(failed)
         _stderr("could not put back after a render: " + ", ".join(str(p) for p in failed))
     try:
-        forget_render_paths([str(work)])
+        forget_render_paths(work)
     except Exception as e:  # noqa: BLE001
         _stderr(f"could not clean FL's recent files after a render: {e}")
 

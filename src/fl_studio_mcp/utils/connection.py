@@ -67,7 +67,8 @@ class FLConnection:
         Raises:
             RuntimeError: If not connected or command fails
             errors.FLCrashedError: FL refused the command as "Operation unsafe at
-                current time" and wrote a crash log: its crash window is open
+                current time" and wrote a crash log, or a read was answered while
+                FL's crash window is open (checked every few seconds; macOS)
         """
         try:
             result = self._midi.send_command(action, params, timeout)
@@ -76,6 +77,7 @@ class FLConnection:
             raise
         errors.note_answer(action, result)
         errors.check_unsafe(result)
+        errors.check_crash_window(action)
         return result
 
     def get_status(self) -> dict[str, Any]:

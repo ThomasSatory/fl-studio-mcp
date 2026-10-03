@@ -19,5 +19,9 @@ def _fresh_project_file_state(monkeypatch, tmp_path):
     monkeypatch.setattr(errors, "_last_ok", None)
     monkeypatch.setattr(errors, "fl_started_at", lambda: None)  # no real ps
     monkeypatch.setattr(errors, "_render_windows", [])
+    monkeypatch.setattr(errors, "_last_change_ok", None)
+    monkeypatch.setattr(errors, "_started_cache", None)
+    monkeypatch.setattr(errors, "_crash_check", None)
+    monkeypatch.setattr(errors, "_warned_no_process", False)
     monkeypatch.setattr(render, "_restore_problems", [])
     monkeypatch.setattr(render, "shared_fl_files", lambda: [])

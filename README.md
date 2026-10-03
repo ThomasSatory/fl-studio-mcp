@@ -419,7 +419,8 @@ lose their other routes in that copy, and sidechain routes (level 0, read from
 the running FL) are not followed, so other tracks do not leak in. Channels
 routed straight to the Master, or straight into a bus the stem keeps, are
 still in that stem; the tool says so (`also_contains`, `stem_warnings`). A bus
-stem is not compared with the tracks it contains.
+stem is not compared with the tracks it contains; it is named
+`<name> (bus: <n> tracks)`, with `kind` and `inputs` (the tracks feeding it).
 
 The WAV files stay in the renders folder (the 30 most recent are kept, see
 `FL_STUDIO_MCP_RENDER_DIR`); `fl_preview_sample` plays one. A render that
@@ -545,12 +546,12 @@ Renders no longer make FL Studio crash: the command-line renderer is a second
 FL Studio that rewrites FL's shared settings files when it exits (reg.xml, the
 browser's recent files and search cache, note colour presets, velocity curves),
 after which the FL you work in crashed at its next save. `fl_render_mix` now
-puts back every such file the render changed (a setting the FL you work in
-writes to one of those files during a render is reverted with it; a file that
-cannot be put back is listed in the render's `notes`). Earlier renders added
+puts back every such file the render changed, with its date (a setting the
+FL you work in writes to one of those files during a render is reverted with
+it; a file that cannot be put back is listed in the render's `notes`). Earlier renders added
 their temp project (`.../flmcp-render-XXXX/<name>.flp`) to FL's recent files,
-pushing your projects out of the list; such lines are now removed after every
-render. A crash log written during a render is the renderer's and is no longer
+pushing your projects out of the list; lines holding `flmcp-render-` are now
+removed after every render. A crash log written during a render is the renderer's and is no longer
 reported as FL Studio crashing.
 
 Saving is more careful: every save really saves (and so changes the file's
@@ -559,10 +560,10 @@ tool only takes the project file once FL has really written it (the file
 changed after the request and FL's `.flp~` temporary file is gone), waits 3 s
 after a reload it caused, and says so when FL Studio crashes during a save,
 including when FL stays open behind its crash window (a new crash log, or
-"Operation unsafe at current time", which other tools now explain too). Any
-command FL refuses as unsafe while the running FL has written a crash log now
-reports the crash, also from read-only tools (FL keeps answering some reads
-behind its crash window).
+"Operation unsafe at current time", which other tools now explain too). FL
+keeps answering some reads behind its crash window, so on macOS read-only
+tools and `fl_connection_status` (`fl_crashed`) now also report a crash log
+the running FL wrote after the last change it carried out.
 
 `fl_add_marker` refuses a position that already has a marker (FL would delete
 that marker and add nothing) and checks the new marker in the saved project.

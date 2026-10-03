@@ -284,7 +284,10 @@ def test_render_mix_with_stems(tool):
     assert enabled(renders[3]["data"]) == [0, 1, 2, 3, 4]
     stems = result["stems"]
     assert [(s["track"], s["name"]) for s in stems] == [
-        (1, "Kick"), (2, "Bass"), (3, "Bass bus")]
+        (1, "Kick"), (2, "Bass"), (3, "Bass bus (bus: 2 tracks)")]
+    assert [(s["kind"], s["inputs"]) for s in stems] == [
+        ("track", []), ("track", []), ("bus", ["Kick", "Bass"])]
+    assert [r["name"] for r in renders][3] == "My Song - stem 3 Bass bus"
     # shares of the MIX energy (rms 0.5 vs 0.4 amplitude; dB values are rounded)
     assert [s["share_pct"] for s in stems] == pytest.approx([100.0, 64.0, 64.0], abs=1.0)
     assert all(not s["silent"] and s["bands"]["sub"] > 35 for s in stems)

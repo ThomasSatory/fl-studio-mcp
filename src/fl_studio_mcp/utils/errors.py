@@ -33,6 +33,19 @@ UNSAFE_MARKER = "Operation unsafe at current time"
 # answers after a crash); a crash log written after it is this session's.
 _loaded_at = time.time()
 _last_ok: float | None = None
+# When FL last carried out a command that changes something (not a read): FL
+# keeps answering some reads behind its crash window, but not these.
+_last_change_ok: float | None = None
+
+# Actions that only read (see is_read_action).
+READ_ACTIONS = {"system.info", "automation.describe", "automation.resolve", "project.snapshot"}
+
+# fl_started_at is cached this long; the crash-window check for reads runs at most this often.
+STARTED_CACHE_SECONDS = 5.0
+CRASH_CHECK_INTERVAL = 5.0
+_started_cache: tuple[float, float | None] | None = None
+_crash_check: tuple[float, Path | None] | None = None
+_warned_no_process = False
 
 FL_PROCESS_NAME = "OsxFL"  # FL Studio's main process on macOS (the CLI renderer too)
 
@@ -103,11 +116,20 @@ def crash_logs_since(since: float) -> list[Path]:
     return [p for _, p in sorted(found, reverse=True)]
 
 
+def is_read_action(action: str) -> bool:
+    """Whether a controller action only reads (get*/is*, system.info, ...)."""
+    method = action.rsplit(".", 1)[-1]
+    return action in READ_ACTIONS or method.startswith(("get", "is"))
+
+
 def note_answer(action: str, result: Any) -> None:
     """Called with every answer from FL: remember when FL last carried out a command."""
-    global _last_ok
+    global _last_ok, _last_change_ok, _crash_check
     if action != "system.info" and isinstance(result, dict) and result.get("success"):
         _last_ok = time.time()
+        if not is_read_action(action):
+            _last_change_ok = _last_ok
+            _crash_check = None  # FL carried out a change: no crash window
 
 
 def last_ok() -> float:
@@ -123,6 +145,7 @@ def fl_started_at() -> float | None:
         pids = subprocess.run(["pgrep", "-x", FL_PROCESS_NAME], capture_output=True,
                               text=True, timeout=3).stdout.split()
         if not pids:
+            _warn_no_process()
             return None
         out = subprocess.run(["ps", "-o", "lstart=", "-p", ",".join(pids)],
                              capture_output=True, text=True, timeout=3,
@@ -139,17 +162,79 @@ def fl_started_at() -> float | None:
     return min(starts) if starts else None
 
 
-def fresh_crash_log() -> Path | None:
-    """The newest crash log of the running FL Studio, if it wrote one.
+def _warn_no_process() -> None:
+    """One stderr line (never stdout: MCP) when pgrep finds no FL while FL answers."""
+    global _warned_no_process
+    if _warned_no_process:
+        return
+    _warned_no_process = True
+    try:
+        import sys
 
-    FL keeps answering some reads behind its crash window, so the last
-    successful command says little; a log written since FL's process started
-    (macOS) is this FL's. Where the start time is unknown, a log written
-    since FL last carried out a command counts.
-    """
-    started = fl_started_at()
-    logs = crash_logs_since(last_ok() if started is None else started)
+        print(f"fl-studio-mcp: pgrep finds no {FL_PROCESS_NAME} process although FL Studio "
+              "answers; crash logs are dated from the last change FL carried out instead.",
+              file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+def fl_started_cached() -> float | None:
+    """fl_started_at, cached for STARTED_CACHE_SECONDS."""
+    global _started_cache
+    now = time.monotonic()
+    if _started_cache is None or now - _started_cache[0] >= STARTED_CACHE_SECONDS:
+        _started_cache = (now, fl_started_at())
+    return _started_cache[1]
+
+
+def crash_since() -> float:
+    """From when a crash log is the running FL's: after the last change FL carried
+    out (reads keep answering behind the crash window), never before FL started
+    (macOS; else before this server started)."""
+    started = fl_started_cached()
+    floor = started if started is not None else _loaded_at
+    return floor if _last_change_ok is None else max(floor, _last_change_ok)
+
+
+def fresh_crash_log() -> Path | None:
+    """The newest crash log of the running FL Studio written since crash_since()."""
+    logs = crash_logs_since(crash_since())
     return logs[0] if logs else None
+
+
+def crash_window_log(force: bool = False) -> Path | None:
+    """The running FL's fresh crash log, checked at most every CRASH_CHECK_INTERVAL.
+
+    Only where FL's start time is known (macOS): elsewhere a log from before a
+    relaunch could not be told apart.
+    """
+    global _crash_check
+    now = time.monotonic()
+    if not force and _crash_check is not None and now - _crash_check[0] < CRASH_CHECK_INTERVAL:
+        return _crash_check[1]
+    log = fresh_crash_log() if fl_started_cached() is not None else None
+    _crash_check = (now, log)
+    return log
+
+
+def crash_window_message(log: Path) -> str:
+    return (f"FL Studio crashed (crash log {log}); close its crash window, relaunch FL "
+            "Studio and reopen the project. MCP backups are in the Backup folder next to it.")
+
+
+def check_crash_window(action: str) -> None:
+    """Raise FLCrashedError for a read while the running FL has a fresh crash log.
+
+    FL keeps answering some reads behind its crash window, so their answers
+    would look fine. A change FL carries out clears it (see note_answer).
+    """
+    if not is_read_action(action):
+        return
+    log = crash_window_log()
+    if log is not None:
+        error = FLCrashedError(crash_window_message(log))
+        error.log = log
+        raise error
 
 
 def crashed_error(text: str, log: Path) -> FLCrashedError:

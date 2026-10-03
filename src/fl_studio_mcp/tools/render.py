@@ -340,9 +340,12 @@ def register_render_tools(mcp: FastMCP) -> None:
         is not compared with the tracks it contains. The WAVs stay in the
         renders folder; play one with fl_preview_sample. Each stem gives
         track, name, path, lufs, peak_dbfs, share_pct (its energy as a % of
-        the mix), silent, inserts (mixer inserts left playing) and, when a
+        the mix), silent, inserts (mixer inserts left playing), kind ("bus"
+        or "track"), inputs (names of the inserts feeding it) and, when a
         kept bus also has its own channels, also_contains; stem_warnings
-        carries masking, dominant and silent tracks and leaks.
+        carries masking, dominant and silent tracks and leaks. A bus stem is
+        named "<mixer name> (bus: <n> tracks)": a bus called "Kick" with
+        share_pct 100 holds every track feeding it, not just the kick.
 
         Args:
             stems: mixer inserts to render alone - a list like [1, 3], "all"
@@ -374,6 +377,7 @@ def register_render_tools(mcp: FastMCP) -> None:
 
         # Resolve the stems before spending time on the render.
         targets: list[int] = []
+        bus_inserts: set[int] = set()
         channels: list[dict] = []
         stems_refused = None
         if stems is not None:
@@ -391,11 +395,13 @@ def register_render_tools(mcp: FastMCP) -> None:
                 channels = [c for c in channels
                             if c.get("type") != "automation_clip"
                             and c.get("index") not in automation]
+                channel_targets = [int(c.get("target_fx_track") or 0) for c in channels]
                 targets = resolve_stems(
-                    stems, flp.mixer_routes(project),
-                    [int(c.get("target_fx_track") or 0) for c in channels],
+                    stems, flp.mixer_routes(project), channel_targets,
                     flp.insert_count(project) - 1,
                 )
+                _, bus_inserts = _used_and_buses(
+                    flp.mixer_routes(project), channel_targets, flp.insert_count(project) - 1)
 
         tempo = project.tempo if project is not None else None
         if project is not None and not tempo:
@@ -462,6 +468,15 @@ def register_render_tools(mcp: FastMCP) -> None:
                 last = flp.insert_count(project) - 1
                 routing_failed = False
 
+                def stem_label(t: int) -> tuple[str, str, list[str]]:
+                    """(mixer name, name shown, names of the inserts feeding t)."""
+                    mixer_name = names.get(t, f"Insert {t}")
+                    inputs = [names.get(i, f"Insert {i}") for i in
+                              sorted(flp.upstream_inserts(routes, t) - {0, last, t})]
+                    if t in bus_inserts:
+                        return mixer_name, f"{mixer_name} (bus: {len(inputs)} tracks)", inputs
+                    return mixer_name, mixer_name, inputs
+
                 def render_stem(t: int, name: str) -> dict:
                     nonlocal routing_failed
                     try:
@@ -470,8 +485,9 @@ def register_render_tools(mcp: FastMCP) -> None:
                         audio = None
                         routing_failed = True
                     stem_data = flp.stem_project_bytes(data, t, audio)
+                    mixer_name, name, inputs = stem_label(t)
                     stem_wav = render.render_wav(
-                        stem_data, f"{path.stem} - stem {t} {name}", timeout)
+                        stem_data, f"{path.stem} - stem {t} {mixer_name}", timeout)
                     overall = mix_analysis.analyze_mix(stem_wav)["overall"]
                     peak = overall.get("peak_dbfs")
                     keep = flp.stem_keep_set(routes, t, audio)
@@ -489,6 +505,8 @@ def register_render_tools(mcp: FastMCP) -> None:
                     entry = {
                         "track": t,
                         "name": name,
+                        "kind": "bus" if t in bus_inserts else "track",
+                        "inputs": inputs,
                         "path": str(stem_wav),
                         "lufs": overall.get("lufs"),
                         "peak_dbfs": peak,
@@ -503,7 +521,7 @@ def register_render_tools(mcp: FastMCP) -> None:
                     return entry
 
                 for n, t in enumerate(targets, start=1):
-                    name = names.get(t, f"Insert {t}")
+                    name = stem_label(t)[1]
                     try:
                         entry = await _in_thread(render_stem, t, name)
                     except Exception as e:  # noqa: BLE001 - one stem never sinks the call

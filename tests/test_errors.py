@@ -164,7 +164,7 @@ def test_crash_logs_before_the_last_successful_command_are_old(monkeypatch):
     log = folder / "Crash old.log"
     log.write_text("x")
     os.utime(log, (time.time() - 100, time.time() - 100))
-    errors.note_answer("mixer.getTrackInfo", {"success": True})
+    errors.note_answer("mixer.setTrackVolume", {"success": True})  # a change FL carried out
     errors.note_answer("system.info", {"success": True})  # answers even after a crash
     assert errors.crash_logs_since(errors.last_ok()) == []
     with pytest.raises(errors.FLBusyError) as e:
@@ -288,3 +288,111 @@ def test_fl_started_at_parses_ps(monkeypatch):
     monkeypatch.setattr(errors.subprocess, "run", fake_run)
     expected = time.mktime(time.strptime("Sun Sep 20 16:04:33 2026", "%a %b %d %H:%M:%S %Y"))
     assert errors.fl_started_at() == expected
+
+
+def test_read_actions():
+    from fl_studio_mcp.utils.errors import is_read_action
+
+    assert all(map(is_read_action, ["mixer.getTrackInfo", "plugins.isValid", "system.info",
+                                    "automation.resolve", "project.snapshot"]))
+    assert not any(map(is_read_action, ["mixer.setTrackVolume", "transport.save",
+                                        "patterns.newEmpty", "general.undo"]))
+
+
+def test_a_change_fl_carried_out_after_the_log_makes_it_old(monkeypatch):
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    monkeypatch.setattr(errors, "fl_started_at", lambda: time.time() - 3600)
+    _crash_log(age=60)
+    assert errors.fresh_crash_log() is not None
+    errors.note_answer("mixer.setTrackVolume", {"success": True})
+    assert errors.fresh_crash_log() is None
+
+
+def test_reads_report_the_crash_window_even_when_fl_answers(monkeypatch):
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    monkeypatch.setattr(errors, "fl_started_at", lambda: time.time() - 3600)
+    conn = _connection(monkeypatch, {"success": True, "tracks": []})
+    assert conn.send_command("mixer.getAllTracks")["tracks"] == []
+    log = _crash_log()
+    monkeypatch.setattr(errors, "_crash_check", None)  # past the 5 s interval
+    with pytest.raises(errors.FLCrashedError, match=r"FL Studio crashed \(crash log") as e:
+        conn.send_command("mixer.getAllTracks")
+    assert e.value.log == log
+    # A change FL carries out means its crash window is not open.
+    assert conn.send_command("mixer.setTrackVolume")["success"]
+    assert conn.send_command("mixer.getAllTracks")["tracks"] == []
+
+
+def test_the_crash_window_check_runs_at_most_every_few_seconds(monkeypatch):
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    monkeypatch.setattr(errors, "fl_started_at", lambda: time.time() - 3600)
+    looks = []
+    real = errors.fresh_crash_log
+    monkeypatch.setattr(errors, "fresh_crash_log", lambda: looks.append(1) or real())
+    conn = _connection(monkeypatch, {"success": True})
+    for _ in range(5):
+        conn.send_command("mixer.getAllTracks")
+    assert len(looks) == 1
+
+
+def test_no_crash_window_check_without_fl_start_time(monkeypatch):
+    conn = _connection(monkeypatch, {"success": True})
+    _crash_log()
+    assert conn.send_command("mixer.getAllTracks")["success"]
+
+
+def test_fl_started_at_is_cached(monkeypatch):
+    from fl_studio_mcp.utils import errors
+
+    calls = []
+    monkeypatch.setattr(errors, "fl_started_at", lambda: calls.append(1) or 1000.0)
+    assert errors.fl_started_cached() == errors.fl_started_cached() == 1000.0
+    assert len(calls) == 1
+
+
+def test_no_fl_process_is_noted_once_on_stderr(monkeypatch, capsys):
+    import subprocess
+
+    from fl_studio_mcp.utils import errors
+
+    monkeypatch.undo()
+    monkeypatch.setattr(errors, "_warned_no_process", False)
+    monkeypatch.setattr(errors.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(errors.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", ""))
+    assert errors.fl_started_at() is None and errors.fl_started_at() is None
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.count("pgrep finds no") == 1
+
+
+def test_connection_status_reports_the_crash(monkeypatch):
+    import time
+
+    from fl_studio_mcp import server
+    from fl_studio_mcp.utils import errors
+
+    monkeypatch.setattr(errors, "fl_started_at", lambda: time.time() - 3600)
+    log = _crash_log()
+
+    class Conn:
+        def ensure_connected(self):
+            pass
+
+        def get_status(self):
+            return {"connected": True}
+
+        def send_command(self, action, params=None, timeout=2.0):
+            return {"success": True, "controller_version": 6}
+
+    monkeypatch.setattr(server, "get_connection", lambda: Conn())
+    status = server.fl_connection_status()
+    assert str(log) in status["fl_crashed"] and "relaunch" in status["fl_crashed"]

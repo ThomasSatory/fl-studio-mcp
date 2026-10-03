@@ -32,7 +32,7 @@ from fl_studio_mcp.tools import (
     register_ui_tools,
 )
 from fl_studio_mcp.tools.annotations import IDEMPOTENT
-from fl_studio_mcp.utils import project_files
+from fl_studio_mcp.utils import errors, project_files
 from fl_studio_mcp.utils.connection import get_connection, reset_connection
 
 # Create the MCP server
@@ -147,6 +147,9 @@ def fl_connection_status(reconnect: bool = False) -> dict:
     Args:
         reconnect: drop the current connection and connect again first - use
                    after starting FL Studio or when commands stopped arriving.
+
+    fl_crashed is set when the running FL Studio wrote a crash log (macOS): its
+    crash window is open even if FL still answers.
     """
     if reconnect:
         reset_connection()
@@ -165,6 +168,9 @@ def fl_connection_status(reconnect: bool = False) -> dict:
         "error": status.get("error"),
     }
     if out["connected"]:
+        log = errors.crash_window_log(force=True)
+        if log is not None:
+            out["fl_crashed"] = errors.crash_window_message(log)
         try:
             info = project_files.controller_info(conn)
             out["controller_version"] = info.get("controller_version")

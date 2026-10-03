@@ -275,6 +275,8 @@ def _fl_state(conn) -> str:
     """"ok", "gone" (FL does not answer) or "unsafe" (FL refuses commands: crash window)."""
     try:
         result = conn.send_command("system.info", None, 2.0)
+    except errors.FLCrashedError:
+        return "unsafe"
     except RuntimeError:
         return "gone"
     if not result.get("success"):
