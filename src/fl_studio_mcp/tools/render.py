@@ -360,7 +360,7 @@ def register_render_tools(mcp: FastMCP) -> None:
         conn = get_connection()
         path = await _in_thread(project_files.current_project_file, conn, save, project_path)
         data = path.read_bytes()
-        render.take_restore_problems()  # only this call's renders count
+        unrestored: list[Path] = []  # shared files this call's renders could not put back
         notes = [
             "The render is of the saved .flp file, not of what is playing in FL.",
         ]
@@ -415,7 +415,8 @@ def register_render_tools(mcp: FastMCP) -> None:
         timeout = render.render_timeout(length)
         total = 1 + len(targets)
         started = time.monotonic()
-        wav = await _in_thread(render.render_wav, data, path.stem, timeout)
+        wav = await _in_thread(render.render_wav, data, path.stem, timeout,
+                               problems=unrestored)
         elapsed = round(time.monotonic() - started, 1)
 
         bounds = None
@@ -487,7 +488,8 @@ def register_render_tools(mcp: FastMCP) -> None:
                     stem_data = flp.stem_project_bytes(data, t, audio)
                     mixer_name, name, inputs = stem_label(t)
                     stem_wav = render.render_wav(
-                        stem_data, f"{path.stem} - stem {t} {mixer_name}", timeout)
+                        stem_data, f"{path.stem} - stem {t} {mixer_name}", timeout,
+                        problems=unrestored)
                     overall = mix_analysis.analyze_mix(stem_wav)["overall"]
                     peak = overall.get("peak_dbfs")
                     keep = flp.stem_keep_set(routes, t, audio)
@@ -561,10 +563,9 @@ def register_render_tools(mcp: FastMCP) -> None:
             result["stems"] = out
             result["stem_warnings"] = stem_warnings
 
-        notes.append(f"WAV files are kept in {render.renders_dir()} (the 30 most recent); "
-                     "play one with fl_preview_sample.")
-        unrestored = render.take_restore_problems()
+        notes.append(f"WAV files are kept in {render.renders_dir()} (the 30 most recent "
+                     "renders; nothing else there is deleted); play one with fl_preview_sample.")
         if unrestored:
-            notes.append(render.restore_problems_note(unrestored))
+            notes.append(render.restore_problems_note(list(dict.fromkeys(unrestored))))
         result["notes"] = notes
         return result

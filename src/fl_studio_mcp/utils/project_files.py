@@ -34,8 +34,9 @@ SAVE_CONTROLLER_VERSION = 4
 # The version of fl_controller/device_FLStudioMCP.py in this repository. Only
 # step shift needs 5 (see tools/channels.py); everything else works with 4.
 # Version 6 checks a written shift against the exact form written and redoes
-# a step FL left without note data; nothing requires it.
-LATEST_CONTROLLER_VERSION = 6
+# a step FL left without note data; version 7 removes a new mixer route again
+# when its level cannot be set. Nothing requires them.
+LATEST_CONTROLLER_VERSION = 7
 
 OUTDATED_FOR_SAVING = (
     "The FLStudioMCP controller script installed in FL Studio (version {version}) is too "
@@ -324,8 +325,9 @@ def save_project(conn, new_version: bool = False,
             return request
         except FLBusyError as e:
             # "Operation unsafe at current time": FL's crash window (or a modal) is open.
-            log = (_new_crash_log(min(errors.last_ok(), request.requested))
-                   or getattr(e, "log", None))
+            # A log from before FL started is an earlier session's (FL was relaunched).
+            since = max(errors.crash_floor(), min(errors.last_ok(), request.requested))
+            log = _new_crash_log(since) or getattr(e, "log", None)
             if log is not None:
                 raise fl_crashed_error(request.path_hint, log) from e
             raise fl_busy_or_crashed_error(request.path_hint, errors.UNSAFE_MARKER) from e

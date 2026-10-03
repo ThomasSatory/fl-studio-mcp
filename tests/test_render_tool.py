@@ -210,8 +210,9 @@ def tool(tmp_path, monkeypatch, request):
     renders = []
     fail_on = set()
 
-    def fake_render(data, name, timeout):
-        renders.append({"name": name, "data": data, "timeout": timeout})
+    def fake_render(data, name, timeout, problems=None):
+        renders.append({"name": name, "data": data, "timeout": timeout,
+                        "problems": problems})
         if any(f"stem {t} " in name for t in fail_on):
             raise ToolError("FL Studio wrote no audio file (exit code 0).")
         if "stem 1" in name:
@@ -495,14 +496,33 @@ def test_trailing_silence_warning_names_the_marker_that_causes_it():
 
 
 def test_render_mix_notes_shared_files_that_could_not_be_put_back(tool, monkeypatch):
-    fl_render_mix, _, _, _ = tool
+    fl_render_mix, _, renders, _ = tool
     real = render_util.render_wav
 
-    def failing(*args, **kwargs):
-        render_util._restore_problems.append(Path("/fl/reg.xml"))
-        return real(*args, **kwargs)
+    def failing(*args, problems=None, **kwargs):
+        problems.append(Path("/fl/reg.xml"))
+        problems.append(Path("/fl/reg.xml"))  # reported once
+        return real(*args, problems=problems, **kwargs)
 
-    render_util._restore_problems.append(Path("/stale/from/an/earlier/call"))
     monkeypatch.setattr(render_util, "render_wav", failing)
     notes = " ".join(fl_render_mix()["notes"])
-    assert "could not be put back: /fl/reg.xml." in notes and "/stale" not in notes
+    assert "could not be put back: /fl/reg.xml." in notes
+
+
+def test_each_render_mix_call_gets_its_own_problem_list(tool, monkeypatch):
+    # Two calls (the second waiting on the render lock) never see each other's files.
+    fl_render_mix, _, renders, _ = tool
+    real = render_util.render_wav
+    first = []
+
+    def failing_once(*args, problems=None, **kwargs):
+        if not first:
+            first.append(problems)
+            problems.append(Path("/fl/reg.xml"))
+        return real(*args, problems=problems, **kwargs)
+
+    monkeypatch.setattr(render_util, "render_wav", failing_once)
+    assert "could not be put back" in " ".join(fl_render_mix()["notes"])
+    assert "could not be put back" not in " ".join(fl_render_mix()["notes"])
+    assert renders[0]["problems"] is not renders[1]["problems"]
+    assert renders[1]["problems"] == []

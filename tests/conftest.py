@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
-from fl_studio_mcp.utils import errors, project_files, render
+from fl_studio_mcp.utils import cache, errors, project_files, render
 
 
 @pytest.fixture(autouse=True)
@@ -23,5 +25,14 @@ def _fresh_project_file_state(monkeypatch, tmp_path):
     monkeypatch.setattr(errors, "_started_cache", None)
     monkeypatch.setattr(errors, "_crash_check", None)
     monkeypatch.setattr(errors, "_warned_no_process", False)
-    monkeypatch.setattr(render, "_restore_problems", [])
+    # The render lock, persisted render windows and pending snapshot stay out of ~/Library.
+    cache_root = tmp_path / "fl-studio-mcp-cache"
+
+    def test_cache_dir():
+        cache_root.mkdir(exist_ok=True)
+        return cache_root
+
+    monkeypatch.setattr(cache, "cache_dir", test_cache_dir)
+    monkeypatch.setattr(render, "_active", None)
+    monkeypatch.setattr(render, "_stopping", threading.Event())
     monkeypatch.setattr(render, "shared_fl_files", lambda: [])

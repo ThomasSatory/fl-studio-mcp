@@ -95,9 +95,9 @@ def test_save_outside_a_midi_event_is_refused(fl):
     modules["transport"].globalTransport.assert_not_called()
 
 
-def test_controller_version_is_6(fl):
+def test_controller_version_is_7(fl):
     controller, _ = fl
-    assert controller.CONTROLLER_VERSION == 6
+    assert controller.CONTROLLER_VERSION == 7
 
 
 def test_track_volume_in_db_bisects_the_fader(fl):
@@ -461,3 +461,41 @@ def test_existing_route_is_not_treated_as_a_loop(fl):
     result = controller.dispatch_command("mixer.setRoute", {"source": 1, "dest": 2,
                                                             "level": 0.3})
     assert result["active"] is True and result["level"] == 0.3
+
+
+def test_a_new_route_whose_level_cannot_be_set_is_removed_again(fl):
+    # FL before 2025 (API < 36) has no setRouteToLevel: the route would send at 100 %.
+    controller, modules = fl
+    mixer = modules["mixer"]
+    routes = _routes(mixer, set())
+    mixer.setRouteToLevel.side_effect = AttributeError("setRouteToLevel")
+    result = controller.dispatch_command("mixer.setRoute", {"source": 1, "dest": 2,
+                                                            "level": 0.5})
+    assert "could not be set" in result["error"] and "API 36" in result["error"]
+    assert "was not kept" in result["error"] and "Route created" not in result["error"]
+    assert result["active"] is False and routes == set()
+    mixer.setRouteTo.assert_called_with(1, 2, False)
+    assert mixer.afterRoutingChanged.call_count == 2
+
+
+def test_an_existing_route_stays_when_its_level_cannot_be_set(fl):
+    controller, modules = fl
+    mixer = modules["mixer"]
+    routes = _routes(mixer, {(1, 2)})
+    mixer.setRouteToLevel.side_effect = AttributeError("setRouteToLevel")
+    result = controller.dispatch_command("mixer.setRoute", {"source": 1, "dest": 2,
+                                                            "level": 0.5})
+    assert "existing route was left as it was" in result["error"]
+    assert result["active"] is True and routes == {(1, 2)}
+
+
+def test_a_route_that_cannot_be_removed_again_says_it_sends_at_full_level(fl):
+    controller, modules = fl
+    mixer = modules["mixer"]
+    routes = _routes(mixer, set())
+    mixer.setRouteTo.side_effect = lambda s, d, on, *a: routes.add((s, d)) if on else None
+    mixer.setRouteToLevel.side_effect = AttributeError("setRouteToLevel")
+    result = controller.dispatch_command("mixer.setRoute", {"source": 1, "dest": 2,
+                                                            "level": 0.5})
+    assert "could not be removed again: it sends at full level" in result["error"]
+    assert result["active"] is True

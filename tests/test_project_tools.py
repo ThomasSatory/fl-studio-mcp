@@ -322,3 +322,48 @@ def test_save_timeout_with_fl_refusing_commands_is_not_blamed_on_a_dialog(song, 
     assert "Is that the open project" not in str(e.value)
     for timer in conn.timers:
         timer.cancel()
+
+
+def test_a_renderer_crash_log_of_another_server_does_not_block_saving(monkeypatch):
+    # The review's reproduction: a log 10 min old, FL started 1 h ago, the render
+    # that wrote it ran in another server process (persisted window only).
+    import json
+    import os
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    now = time.time()
+    monkeypatch.setattr(errors, "fl_started_at", lambda: now - 3600)
+    errors._windows_file().write_text(json.dumps(
+        {"windows": [{"start": now - 660, "end": now - 590, "pid": 999_999}]}))
+    log = _crash_log(errors)
+    os.utime(log, (now - 600, now - 600))
+    conn = SaveConnection()
+    project_files.save_project(conn)  # no FLCrashedError
+    assert conn.sent.count("transport.save") == 1
+
+
+def test_save_refused_by_a_modal_after_a_relaunch_is_not_an_old_crash(monkeypatch):
+    # The server outlived FL's crash (log at T1); FL was relaunched and a dialog is
+    # open: no command has succeeded since. The T1 log is the previous FL's.
+    import os
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    now = time.time()
+    monkeypatch.setattr(errors, "_loaded_at", now - 7200)  # the server started first
+    log = _crash_log(errors)
+    os.utime(log, (now - 600, now - 600))
+    monkeypatch.setattr(errors, "fl_started_at", lambda: now - 60)  # relaunched since
+    conn = SaveConnection(save_answers=[UNSAFE])
+    with pytest.raises(errors.FLBusyError) as e:
+        project_files.save_project(conn)
+    assert not isinstance(e.value, errors.FLCrashedError)
+    assert "modal window" in str(e.value)
+    # The same log, with FL started before it: that FL's crash.
+    monkeypatch.setattr(errors, "fl_started_at", lambda: now - 3600)
+    monkeypatch.setattr(errors, "_started_cache", None)
+    with pytest.raises(errors.FLCrashedError):
+        project_files.save_project(SaveConnection(save_answers=[UNSAFE]))

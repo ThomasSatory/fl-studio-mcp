@@ -32,7 +32,7 @@ from fl_studio_mcp.tools import (
     register_ui_tools,
 )
 from fl_studio_mcp.tools.annotations import IDEMPOTENT
-from fl_studio_mcp.utils import errors, project_files
+from fl_studio_mcp.utils import errors, project_files, render
 from fl_studio_mcp.utils.connection import get_connection, reset_connection
 
 # Create the MCP server
@@ -181,8 +181,13 @@ def fl_connection_status(reconnect: bool = False) -> dict:
                 out["controller_warning"] = project_files.OUTDATED_FOR_SAVING.format(
                     version=version)
             elif version < project_files.LATEST_CONTROLLER_VERSION:
-                need = ("step shift in fl_write_steps needs version 5"
-                        if version < 5 else "version 6 checks written steps more strictly")
+                if version < 5:
+                    need = "step shift in fl_write_steps needs version 5"
+                elif version < 6:
+                    need = "version 6 checks written steps more strictly"
+                else:
+                    need = ("version 7 removes a new mixer route again when its level "
+                            "cannot be set")
                 out["controller_note"] = (
                     f"The controller script is at version {version}, the latest is "
                     f"{project_files.LATEST_CONTROLLER_VERSION}: {need}. Copy "
@@ -211,6 +216,9 @@ register_render_tools(mcp)
 
 def main():
     """Run the FL Studio MCP server."""
+    # A render left unfinished by a server that died: put FL's shared files back.
+    render.recover_at_startup()
+    render.install_exit_handlers()
     mcp.run()
 
 

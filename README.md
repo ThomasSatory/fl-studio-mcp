@@ -237,7 +237,7 @@ Using a different MCP-compatible client (Gemini, an OpenAI-based tool, Cursor, e
 | `FL_STUDIO_MCP_MIDI_PORT` | Name (or case-insensitive substring) of the MIDI output port to use. Without it the server only accepts a port containing `IAC`, `loopMIDI` or `Midi Through`, and refuses to send anything to another device (a hardware synth would otherwise receive the trigger note). |
 | `FL_STUDIO_MCP_SETTINGS_DIR` | FL Studio's `Settings` folder when it is not the default (Options > File settings > User data folder). |
 | `FL_STUDIO_MCP_FL_BINARY` | Full path of FL Studio's executable for `fl_render_mix`, when it is not found in `/Applications` (macOS: `FL Studio 2025.app/Contents/MacOS/OsxFL`) or `Program Files\Image-Line` (Windows: `FL64.exe`). |
-| `FL_STUDIO_MCP_RENDER_DIR` | Folder where `fl_render_mix` keeps its WAV files (default: `~/Library/Caches/fl-studio-mcp/renders` on macOS, `%LOCALAPPDATA%\fl-studio-mcp\renders` on Windows, `~/.cache/fl-studio-mcp/renders` elsewhere). |
+| `FL_STUDIO_MCP_RENDER_DIR` | Folder where `fl_render_mix` keeps its WAV files (default: `~/Library/Caches/fl-studio-mcp/renders` on macOS, `%LOCALAPPDATA%\fl-studio-mcp\renders` on Windows, `~/.cache/fl-studio-mcp/renders` elsewhere). Only the renders the server wrote there (`<name> <date> <time>.wav`) are ever deleted, past the 30 most recent; other files in the folder are left alone. The render lock and render state stay in the default cache folder whatever this says. |
 
 On a French macOS the IAC bus is called `Gestionnaire IAC Bus 1`; it contains `IAC`, so it is picked up automatically.
 
@@ -531,7 +531,7 @@ Studio's command-line renderer and analyse the result (whole song, sections
 and per-track stems). It needs numpy (installed with the package). The
 server instructions no longer tell the assistant to ask you for an export.
 
-The controller script is at version 6: copy
+The controller script is at version 7: copy
 `fl_controller/device_FLStudioMCP.py` into FL Studio again (setup.sh) and
 restart FL Studio. Version 4 fixed FL Studio crashing (or saving nothing) when
 a tool saves the project; the server refuses to save through an older script,
@@ -540,7 +540,9 @@ and `fl_connection_status` warns about it. Version 5 is only required for
 parameter); it also reports pattern lengths in both steps and beats. Version 6
 reads a written shift back as written (the exact raw value it wrote; whether FL
 plays it as an absolute or relative offset is not confirmed yet) and rewrites
-a step FL left without its note.
+a step FL left without its note. Version 7 removes a new mixer route again
+when its level cannot be set (FL before 2025), instead of leaving it at full
+level.
 
 Renders no longer make FL Studio crash: the command-line renderer is a second
 FL Studio that rewrites FL's shared settings files when it exits (reg.xml, the

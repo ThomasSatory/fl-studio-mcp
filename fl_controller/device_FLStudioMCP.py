@@ -61,7 +61,7 @@ TRIGGER_NOTE = 127
 
 # Bumped whenever an action is added or changes; the MCP server reads it via
 # system.info to detect an outdated script installed in FL Studio.
-CONTROLLER_VERSION = 6
+CONTROLLER_VERSION = 7
 
 # Project loads seen since the script started (OnProjectLoad), so the server
 # can wait for a reload it requested. The instance id changes when FL reloads
@@ -1731,7 +1731,8 @@ def handle_mixer_set_route(params: dict) -> dict:
     if source == dest:
         return {"error": "A track cannot be routed to itself"}
     enabled = bool(params.get("enabled", True))
-    if enabled and not mixer.getRouteSendActive(source, dest):
+    was_active = bool(mixer.getRouteSendActive(source, dest))
+    if enabled and not was_active:
         path = _route_path(dest, source)
         if path:
             # FL silently refuses a route that would close a loop.
@@ -1752,8 +1753,25 @@ def handle_mixer_set_route(params: dict) -> dict:
             mixer.setRouteToLevel(source, dest, float(params["level"]))
             level_applied = mixer.getRouteToLevel(source, dest)
         except Exception as e:
-            return {"error": "Route created, but its level could not be set (needs FL "
-                             "Studio 2025 / API 36+): %s" % e}
+            # Leave the routing as it was: a new route would send at full level.
+            undone = was_active
+            if not was_active:
+                try:
+                    mixer.setRouteTo(source, dest, False)
+                    mixer.afterRoutingChanged()
+                    undone = not mixer.getRouteSendActive(source, dest)
+                except Exception:
+                    undone = False
+            if was_active:
+                what = "The existing route was left as it was"
+            elif undone:
+                what = "The route was not kept"
+            else:
+                what = "The route could not be removed again: it sends at full level"
+            return {"error": "The level of the route from insert %d to insert %d could "
+                             "not be set (needs FL Studio 2025 / API 36+): %s. %s."
+                             % (source, dest, e, what),
+                    "active": bool(mixer.getRouteSendActive(source, dest))}
     return {
         "source": source,
         "dest": dest,

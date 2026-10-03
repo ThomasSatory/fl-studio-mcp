@@ -7,6 +7,7 @@ like data; raising ToolError marks the MCP response as an error instead.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import subprocess
@@ -18,6 +19,7 @@ from typing import Any
 
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp.utils import cache
 from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
 
 # Envelope keys the controller adds to every answer (request id, status). They
@@ -52,9 +54,64 @@ FL_PROCESS_NAME = "OsxFL"  # FL Studio's main process on macOS (the CLI renderer
 # (start, end) of each command-line render (end None while it runs). The
 # renderer is a second FL Studio that writes its crash logs into the same
 # folder; a log written inside a window is the renderer's, not the main FL's.
+# Each window is also written to RENDER_WINDOWS_FILE in the cache folder, so
+# that another server process (another client) and a later session know them:
+# FL's crash logs say nothing of the process that wrote them.
 _render_windows: list[tuple[float, float | None]] = []
 RENDER_WINDOW_MARGIN = 5.0  # seconds after the renderer exited
 _MAX_RENDER_WINDOWS = 50
+RENDER_WINDOWS_FILE = "render-windows.json"
+RENDER_WINDOWS_KEEP = 30 * 86400.0  # persisted windows older than this are dropped
+_MAX_PERSISTED_WINDOWS = 200
+# A persisted window never closed (its server died mid-render): a render
+# lasts at most the longest render timeout (1200 s) before it is stopped.
+OPEN_WINDOW_MAX = 1500.0
+
+
+def _windows_file() -> Path:
+    return cache.cache_dir() / RENDER_WINDOWS_FILE
+
+
+def _load_persisted_windows() -> list[dict]:
+    try:
+        data = json.loads(_windows_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    windows = data.get("windows") if isinstance(data, dict) else None
+    if not isinstance(windows, list):
+        return []
+    return [w for w in windows if isinstance(w, dict)
+            and isinstance(w.get("start"), (int, float))
+            and (w.get("end") is None or isinstance(w.get("end"), (int, float)))]
+
+
+def _window_end(window: dict, now: float) -> float:
+    """When a persisted window stops covering crash logs."""
+    end = window.get("end")
+    if end is not None:
+        return float(end) + RENDER_WINDOW_MARGIN
+    return min(now, float(window["start"]) + OPEN_WINDOW_MAX)
+
+
+def _persist_window(start: float, end: float | None) -> None:
+    """Record (or close) this process's window `start` in RENDER_WINDOWS_FILE; never raises."""
+    try:
+        path = _windows_file()
+        now = time.time()
+        windows = _load_persisted_windows()
+        for window in windows:
+            if window["start"] == start and window.get("pid") == os.getpid():
+                window["end"] = end
+                break
+        else:
+            windows.append({"start": start, "end": end, "pid": os.getpid()})
+        kept = [w for w in windows if _window_end(w, now) >= now - RENDER_WINDOWS_KEEP]
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"windows": kept[-_MAX_PERSISTED_WINDOWS:]}),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, ValueError):
+        pass
 
 
 @contextmanager
@@ -62,22 +119,33 @@ def render_window() -> Iterator[None]:
     """Mark the time a command-line render runs (see crash_logs_since)."""
     entry: tuple[float, float | None] = (time.time(), None)
     _render_windows.append(entry)
+    _persist_window(entry[0], None)
     try:
         yield
     finally:
+        end = time.time()
         try:
             index = _render_windows.index(entry)
-            _render_windows[index] = (entry[0], time.time())
+            _render_windows[index] = (entry[0], end)
         except ValueError:
             pass
         del _render_windows[:-_MAX_RENDER_WINDOWS]
+        _persist_window(entry[0], end)
 
 
-def in_render_window(when: float) -> bool:
-    """Whether `when` (epoch seconds) falls while a command-line render ran."""
+def render_windows() -> list[tuple[float, float]]:
+    """(start, end) of the renders of this process and of the persisted ones."""
     now = time.time()
-    return any(start <= when <= (now if end is None else end + RENDER_WINDOW_MARGIN)
-               for start, end in _render_windows)
+    spans = [(start, now if end is None else end + RENDER_WINDOW_MARGIN)
+             for start, end in _render_windows]
+    spans += [(float(w["start"]), _window_end(w, now)) for w in _load_persisted_windows()]
+    return spans
+
+
+def in_render_window(when: float, windows: list[tuple[float, float]] | None = None) -> bool:
+    """Whether `when` (epoch seconds) falls while a command-line render ran."""
+    spans = render_windows() if windows is None else windows
+    return any(start <= when <= end for start, end in spans)
 
 
 class FLBusyError(ToolError):
@@ -95,23 +163,38 @@ def crash_logs_dir() -> Path:
     return get_fl_settings_base().parent / "Support" / "Logs" / "Crash"
 
 
+def is_crash_log_name(name: str) -> bool:
+    """Whether `name` is one of FL's crash logs ("Crash <date>_<time>.log")."""
+    return name.startswith("Crash ") and name.lower().endswith(".log")
+
+
 def crash_logs_since(since: float) -> list[Path]:
     """Crash logs FL wrote at or after `since` (epoch seconds), newest first.
 
-    Logs written while a command-line render ran are left out: they are the
-    renderer's (a separate FL Studio process), not the FL the user works in.
+    Only FL's own logs count ("Crash 2026-10-03_142507.log"): never .DS_Store,
+    an editor's swap file or another file of the folder. Logs written while a
+    command-line render ran (in this process or another one, see
+    render_window) are left out: they are the renderer's (a separate FL
+    Studio process), not the FL the user works in.
     """
     found = []
     try:
         entries = list(crash_logs_dir().iterdir())
     except OSError:
         return []
+    windows = None
     for path in entries:
+        if not is_crash_log_name(path.name):
+            continue
         try:
             mtime = path.stat().st_mtime
         except OSError:
             continue
-        if path.is_file() and mtime >= since and not in_render_window(mtime):
+        if not path.is_file() or mtime < since:
+            continue
+        if windows is None:
+            windows = render_windows()
+        if not in_render_window(mtime, windows):
             found.append((mtime, path))
     return [p for _, p in sorted(found, reverse=True)]
 
@@ -191,9 +274,15 @@ def crash_since() -> float:
     """From when a crash log is the running FL's: after the last change FL carried
     out (reads keep answering behind the crash window), never before FL started
     (macOS; else before this server started)."""
-    started = fl_started_cached()
-    floor = started if started is not None else _loaded_at
+    floor = crash_floor()
     return floor if _last_change_ok is None else max(floor, _last_change_ok)
+
+
+def crash_floor() -> float:
+    """No crash log before this is the running FL's: when FL started (macOS), else
+    when this server started."""
+    started = fl_started_cached()
+    return started if started is not None else _loaded_at
 
 
 def fresh_crash_log() -> Path | None:

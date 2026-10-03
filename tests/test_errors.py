@@ -396,3 +396,160 @@ def test_connection_status_reports_the_crash(monkeypatch):
     monkeypatch.setattr(server, "get_connection", lambda: Conn())
     status = server.fl_connection_status()
     assert str(log) in status["fl_crashed"] and "relaunch" in status["fl_crashed"]
+
+
+# --- Crash logs: only FL's own, never the renderer's (any process) -----------
+
+
+def _named_log(name: str, age: float = 0.0):
+    import os
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    folder = errors.crash_logs_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_text("x")
+    when = time.time() - age
+    os.utime(path, (when, when))
+    return path
+
+
+def test_only_fl_crash_logs_count():
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    for name in (".DS_Store", ".Crash 2026-10-03_142507.log", "Crash 2026-10-03_142507.log.swp",
+                 "Icon\r", "notes.txt", "Crash.log~", "Crash2026.log"):
+        _named_log(name)
+    assert errors.crash_logs_since(time.time() - 60) == []
+    log = _named_log("Crash 2026-10-03_142507.log")
+    assert errors.crash_logs_since(time.time() - 60) == [log]
+
+
+def test_a_ds_store_written_after_a_relaunch_does_not_block_reads(monkeypatch):
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    monkeypatch.setattr(errors, "fl_started_at", lambda: time.time() - 600)
+    _named_log(".DS_Store")  # Finder opened the Crash folder
+    errors.check_crash_window("system.info")  # no FLCrashedError
+
+
+def _persist_foreign_window(start: float, end: float | None, pid: int = 999_999):
+    """A render window written by another server process (or an earlier session)."""
+    import json
+
+    from fl_studio_mcp.utils import errors
+
+    path = errors._windows_file()
+    data = {"windows": []}
+    if path.exists():
+        data = json.loads(path.read_text())
+    data["windows"].append({"start": start, "end": end, "pid": pid})
+    path.write_text(json.dumps(data))
+
+
+def test_a_renderer_log_of_another_process_is_not_the_running_fls(monkeypatch):
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    # FL started 1 h ago; another server's render crashed 10 min ago.
+    monkeypatch.setattr(errors, "fl_started_at", lambda: time.time() - 3600)
+    now = time.time()
+    _persist_foreign_window(now - 660, now - 590)
+    _named_log("Crash 2026-10-03_142507.log", age=600)
+    assert errors.crash_logs_since(now - 3600) == []
+    errors.check_crash_window("system.info")  # no FLCrashedError
+    # A crash of the main FL outside that window still counts.
+    main = _named_log("Crash 2026-10-03_143000.log", age=300)
+    assert errors.crash_logs_since(now - 3600) == [main]
+
+
+def test_a_window_left_open_by_a_dead_server_covers_at_most_a_render(monkeypatch):
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    now = time.time()
+    _persist_foreign_window(now - 3000, None)
+    inside = _named_log("Crash 2026-10-03_100000.log", age=2900)
+    after = _named_log("Crash 2026-10-03_110000.log", age=3000 - errors.OPEN_WINDOW_MAX - 60)
+    assert errors.crash_logs_since(now - 4000) == [after]
+    assert inside.exists()
+
+
+def test_render_windows_are_written_for_other_processes_and_later_sessions(monkeypatch):
+    import json
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    with errors.render_window():
+        (window,) = json.loads(errors._windows_file().read_text())["windows"]
+        assert window["end"] is None
+        log = _named_log("Crash 2026-10-03_142507.log")
+    # A new server process: nothing in memory, only the file.
+    monkeypatch.setattr(errors, "_render_windows", [])
+    (window,) = json.loads(errors._windows_file().read_text())["windows"]
+    assert window["end"] is not None
+    assert errors.crash_logs_since(time.time() - 60) == []
+    assert log.exists()
+
+
+def test_persisted_windows_are_pruned(monkeypatch):
+    import json
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    now = time.time()
+    _persist_foreign_window(now - errors.RENDER_WINDOWS_KEEP - 3600,
+                            now - errors.RENDER_WINDOWS_KEEP - 3000)
+    for i in range(errors._MAX_PERSISTED_WINDOWS + 10):
+        _persist_foreign_window(now - 1000 + i, now - 999 + i)
+    with errors.render_window():
+        pass
+    windows = json.loads(errors._windows_file().read_text())["windows"]
+    assert len(windows) == errors._MAX_PERSISTED_WINDOWS
+    assert all(w["start"] > now - 2000 for w in windows)
+    assert windows[-1]["pid"] != 999_999  # this render is kept
+
+
+def test_an_unreadable_windows_file_is_ignored():
+    import json
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    errors._windows_file().write_text("{not json")
+    log = _named_log("Crash 2026-10-03_142507.log")
+    assert errors.crash_logs_since(time.time() - 60) == [log]
+    with errors.render_window():  # rewritten from scratch
+        pass
+    (window,) = json.loads(errors._windows_file().read_text())["windows"]
+    assert window["end"] >= window["start"]
+
+
+def test_status_names_what_the_latest_controller_adds(monkeypatch):
+    from fl_studio_mcp import server
+    from fl_studio_mcp.utils import project_files
+
+    class Conn:
+        def ensure_connected(self):
+            pass
+
+        def get_status(self):
+            return {"connected": True}
+
+        def send_command(self, action, params=None, timeout=2.0):
+            return {"success": True, "controller_version": 6}
+
+    monkeypatch.setattr(server, "get_connection", lambda: Conn())
+    assert project_files.LATEST_CONTROLLER_VERSION == 7
+    note = server.fl_connection_status()["controller_note"]
+    assert "version 6, the latest is 7" in note and "mixer route" in note

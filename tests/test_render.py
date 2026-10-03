@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -23,10 +24,11 @@ if mode == "crash_once":
     if calls == 1:
         os.kill(os.getpid(), signal.SIGSEGV)
     mode = "ok"
-if mode == "partial_crash_once":
+if mode in ("partial_crash_once", "big_partial_crash_once"):
     wav = flp.with_suffix(".wav")
     if calls == 1:
-        wav.write_bytes(b"RIF")
+        # FL's header (44 bytes and more) may be on disk when it crashes.
+        wav.write_bytes(b"RIF" if mode == "partial_crash_once" else b"RIFF" + bytes(96))
         os.kill(os.getpid(), signal.SIGSEGV)
     if wav.exists():
         sys.exit(3)  # the partial file of the crash was left behind
@@ -40,6 +42,9 @@ if shared:  # like FL's render instance: rewrite the shared settings files on th
     (shared / "Mapping" / "Vel curve 2.env").write_text("new")
     (shared / "Auto saved.ncp").write_text("created")
 if mode == "crash":
+    os.kill(os.getpid(), signal.SIGSEGV)
+if mode == "big_partial_crash":
+    flp.with_suffix(".wav").write_bytes(b"RIFF" + bytes(96))
     os.kill(os.getpid(), signal.SIGSEGV)
 if mode == "sleep":
     time.sleep(60)
@@ -115,14 +120,36 @@ def test_purge(env):
     out.mkdir(parents=True)
     now = time.time()
     for i in range(35):
-        f = out / f"old{i}.wav"
+        f = out / f"old 2026-01-01 10h00m{i:02d}.wav"
         f.write_bytes(b"x")
         os.utime(f, (now - 1000 + i, now - 1000 + i))
     new = render.render_wav(b"x", "s", 30, binary=fake)
     wavs = list(out.glob("*.wav"))
     assert len(wavs) == render.RENDER_KEEP
     assert new in wavs
-    assert not (out / "old0.wav").exists()
+    assert not (out / "old 2026-01-01 10h00m00.wav").exists()
+
+
+def test_purge_never_deletes_a_wav_the_server_did_not_write(env):
+    # FL_STUDIO_MCP_RENDER_DIR may point at a folder holding the user's own audio.
+    fake, out = env
+    out.mkdir(parents=True)
+    old = time.time() - 10_000
+    foreign = [out / f"{name}.wav" for name in (
+        "Kick 01", "My bounce 2026-01-01", "vocal take 3", "mix 2026-01-01 10h00m")]
+    foreign += [out / f"Take {i}.wav" for i in range(40)]
+    for f in foreign:
+        f.write_bytes(b"user audio")
+        os.utime(f, (old, old))
+    for i in range(35):
+        f = out / f"s 2026-01-01 10h00m{i:02d}-{i + 2}.wav"
+        f.write_bytes(b"x")
+        os.utime(f, (old + i, old + i))
+    new = render.render_wav(b"x", "s", 30, binary=fake)
+    assert all(f.read_bytes() == b"user audio" for f in foreign)
+    ours = [p for p in out.glob("*.wav") if render.RENDER_NAME.search(p.name)]
+    assert len(ours) == render.RENDER_KEEP and new in ours
+    assert render.RENDER_NAME.search(new.name)
 
 
 def test_render_command():
@@ -206,6 +233,28 @@ def test_partial_wav_of_a_crash_is_removed_before_the_retry(env, monkeypatch, tm
     path = render.render_wav(b"x", "s", 30, binary=fake)
     assert path.read_bytes().startswith(b"RIFF")
     assert counter.read_text() == "2"
+
+
+def test_a_renderer_killed_after_writing_a_header_is_retried(env, monkeypatch, tmp_path):
+    # 100 bytes passes the size check: a signal still means the file is partial.
+    fake, _ = env
+    counter = tmp_path / "calls"
+    monkeypatch.setenv("FAKE_FL_MODE", "big_partial_crash_once")
+    monkeypatch.setenv("FAKE_FL_COUNTER", str(counter))
+    path = render.render_wav(b"x", "s", 30, binary=fake)
+    assert path.read_bytes() == b"RIFF" + bytes(60)  # the retry's file, not the partial one
+    assert counter.read_text() == "2"
+
+
+def test_a_renderer_killed_twice_after_writing_audio_is_an_error(env, monkeypatch, tmp_path):
+    fake, out = env
+    counter = tmp_path / "calls"
+    monkeypatch.setenv("FAKE_FL_MODE", "big_partial_crash")
+    monkeypatch.setenv("FAKE_FL_COUNTER", str(counter))
+    with pytest.raises(ToolError, match="renderer crashed"):
+        render.render_wav(b"x", "s", 30, binary=fake)
+    assert counter.read_text() == "2"
+    assert not list(out.glob("*.wav"))
 
 
 @pytest.fixture
@@ -482,12 +531,17 @@ def test_files_that_could_not_be_put_back_are_reported_on_stderr(env, monkeypatc
         return []
 
     monkeypatch.setattr(render, "restore_shared_files", restore)
-    assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+    problems: list[Path] = []
+    assert render.render_wav(b"x", "s", 30, binary=fake, problems=problems).exists()
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.count("\n") == 1 and "/fl/reg.xml" in captured.err
-    assert render.take_restore_problems() == [Path("/fl/reg.xml")]
-    assert render.take_restore_problems() == []
+    assert problems == [Path("/fl/reg.xml")]
+    # Each render reports into its caller's list: nothing is kept between calls.
+    other: list[Path] = []
+    monkeypatch.setattr(render, "restore_shared_files", lambda snap, failed=None: [])
+    assert render.render_wav(b"x", "s", 30, binary=fake, problems=other).exists()
+    assert other == [] and problems == [Path("/fl/reg.xml")]
 
 
 def test_a_crash_log_written_during_a_render_is_the_renderers(env, monkeypatch):
@@ -511,3 +565,206 @@ def test_a_crash_log_written_during_a_render_is_the_renderers(env, monkeypatch):
     later = time.time() + errors.RENDER_WINDOW_MARGIN + 1
     os.utime(log, (later, later))
     assert errors.crash_logs_since(start) == [log]
+
+
+# --- Render state shared by every server process (lock, pending snapshot) ---
+
+
+def test_the_render_lock_ignores_the_renders_folder_setting(env, monkeypatch, tmp_path):
+    from fl_studio_mcp.utils import cache
+
+    fake, out = env
+    seen = []
+    real = render._RenderLock
+
+    class Spy(real):
+        def __init__(self, path, blocking=True):
+            seen.append(path)
+            super().__init__(path, blocking)
+
+    monkeypatch.setattr(render, "_RenderLock", Spy)
+    render.render_wav(b"x", "s", 30, binary=fake)
+    monkeypatch.setenv("FL_STUDIO_MCP_RENDER_DIR", str(tmp_path / "elsewhere"))
+    render.render_wav(b"x", "s", 30, binary=fake)
+    assert seen == [cache.cache_dir() / render.LOCK_FILE] * 2
+    assert not (out / ".render.lock").exists()
+
+
+def test_the_snapshot_is_on_disk_while_the_renderer_runs_and_gone_after(env, shared,
+                                                                         monkeypatch):
+    fake, _ = env
+    seen = {}
+    real = render._run_renderer
+
+    def spy(binary, flp, timeout, on_start=None):
+        def started(proc):
+            on_start(proc)
+            seen["pending"] = render.load_pending()
+
+        return real(binary, flp, timeout, started)
+
+    monkeypatch.setattr(render, "_run_renderer", spy)
+    assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+    snap, manifest = seen["pending"]
+    assert snap[shared / "reg.xml"][0] == b"user settings"
+    assert snap[shared / "Auto saved.ncp"] is None
+    assert isinstance(manifest["renderer_pid"], int)
+    assert render.load_pending() is None and not render._pending_dir().exists()
+    _assert_restored(shared)
+
+
+def _leave_a_pending_render(shared, work):
+    """What a server killed mid-render leaves: its snapshot, then the renderer's changes."""
+    snap = render.snapshot_shared_files()
+    render.save_pending(snap, work)
+    (shared / "reg.xml").write_text("render instance")
+    (shared / "Recent files.scr").write_text(f"recent + {work}/s.flp")
+    (shared / "Mapping" / "Vel curve 2.env").write_text("new")
+    (shared / "Auto saved.ncp").write_text("created")
+
+
+def test_the_next_render_puts_back_what_a_dead_servers_render_changed(env, shared,
+                                                                       monkeypatch):
+    fake, _ = env
+    monkeypatch.delenv("FAKE_FL_SHARED")  # this render changes nothing itself
+    work = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    _leave_a_pending_render(shared, work)
+    assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+    _assert_restored(shared)
+    assert not work.exists() and render.load_pending() is None
+
+
+def test_server_start_puts_back_a_pending_snapshot(shared, tmp_path):
+    work = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    _leave_a_pending_render(shared, work)
+    render.recover_at_startup()
+    _assert_restored(shared)
+    assert not work.exists() and render.load_pending() is None
+    render.recover_at_startup()  # nothing left: a no-op
+    _assert_restored(shared)
+
+
+def test_server_start_leaves_the_snapshot_to_a_render_that_holds_the_lock(shared):
+    work = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    try:
+        _leave_a_pending_render(shared, work)
+        with render._RenderLock(render.render_lock_path()):
+            render.recover_at_startup()  # must not block nor touch anything
+            assert (shared / "reg.xml").read_text() == "render instance"
+        assert render.load_pending() is not None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_a_snapshot_whose_restore_fails_is_kept_for_the_next_try(shared, monkeypatch):
+    work = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    try:
+        _leave_a_pending_render(shared, work)
+
+        def boom(snap, failed=None):
+            raise RuntimeError("disk gone")
+
+        monkeypatch.setattr(render, "restore_shared_files", boom)
+        render.recover_at_startup()
+        assert render.load_pending() is not None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_old_render_temp_folders_are_removed(tmp_path):
+    old = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    fresh = Path(tempfile.mkdtemp(prefix=render.TEMP_PREFIX))
+    other = Path(tempfile.mkdtemp(prefix="not-ours-"))
+    try:
+        (old / "s.flp").write_bytes(b"x")
+        hours_ago = time.time() - 2 * 3600
+        for folder in (old, other):
+            os.utime(folder, (hours_ago, hours_ago))
+        render.clean_temp_dirs()
+        assert not old.exists() and fresh.exists() and other.exists()
+    finally:
+        for folder in (old, fresh, other):
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+SERVER = """
+import sys, threading
+from pathlib import Path
+from fl_studio_mcp.utils import cache, render
+cache_root, shared = Path(sys.argv[1]), Path(sys.argv[2])
+cache.cache_dir = lambda: cache_root
+render.shared_fl_files = lambda: [
+    (shared, "reg.xml"), (shared, "Recent files.scr"), (shared, "Auto saved.ncp"),
+    (shared, "untouched"), (shared / "Mapping", "*.env")]
+render.install_exit_handlers()
+# Like the MCP server: the render runs in a worker thread, the main thread waits.
+worker = threading.Thread(target=render.render_wav,
+                          args=(b"x", "s", 300), kwargs={"binary": Path(sys.argv[3])})
+worker.start()
+while worker.is_alive():
+    worker.join(0.1)
+"""
+
+
+def _start_server(env, shared, tmp_path, monkeypatch):
+    import subprocess
+
+    from fl_studio_mcp.utils import cache
+
+    fake, _ = env
+    monkeypatch.setenv("FAKE_FL_MODE", "sleep")  # rewrites the shared files, then hangs
+    script = tmp_path / "server.py"
+    script.write_text(SERVER)
+    proc = subprocess.Popen([sys.executable, str(script), str(cache.cache_dir()),
+                             str(shared), str(fake)], stderr=subprocess.PIPE)
+    deadline = time.time() + 20
+    while (shared / "reg.xml").read_text() != "render instance":
+        assert time.time() < deadline and proc.poll() is None, "the render never started"
+        time.sleep(0.05)
+    manifest = None
+    while manifest is None or manifest.get("renderer_pid") is None:
+        assert time.time() < deadline
+        loaded = render.load_pending()
+        manifest = loaded[1] if loaded else None
+        time.sleep(0.05)
+    return proc, manifest
+
+
+def _gone(pid, timeout=10.0):
+    from fl_studio_mcp.utils import cache
+
+    deadline = time.time() + timeout
+    while cache.pid_alive(pid) and time.time() < deadline:
+        time.sleep(0.05)
+    return not cache.pid_alive(pid)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_a_server_killed_mid_render_is_recovered_at_the_next_start(env, shared, tmp_path,
+                                                                    monkeypatch):
+    import signal
+
+    proc, manifest = _start_server(env, shared, tmp_path, monkeypatch)
+    renderer = manifest["renderer_pid"]
+    work = Path(manifest["work"])
+    proc.send_signal(signal.SIGKILL)  # nothing runs: no finally, no atexit
+    proc.wait(timeout=10)
+    assert (shared / "reg.xml").read_text() == "render instance"
+    render.recover_at_startup()
+    assert _gone(renderer)  # the orphaned renderer was stopped
+    _assert_restored(shared)
+    assert not work.exists() and render.load_pending() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_sigterm_mid_render_stops_the_renderer_and_puts_the_files_back(env, shared, tmp_path,
+                                                                        monkeypatch):
+    import signal
+
+    proc, manifest = _start_server(env, shared, tmp_path, monkeypatch)
+    proc.send_signal(signal.SIGTERM)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 128 + signal.SIGTERM, err
+    assert _gone(manifest["renderer_pid"])
+    _assert_restored(shared)
+    assert not Path(manifest["work"]).exists() and render.load_pending() is None
