@@ -17,4 +17,7 @@ def _fresh_project_file_state(monkeypatch, tmp_path):
     crash_dir = tmp_path / "fl-user-data" / "Support" / "Logs" / "Crash"
     monkeypatch.setattr(errors, "crash_logs_dir", lambda: crash_dir)
     monkeypatch.setattr(errors, "_last_ok", None)
+    monkeypatch.setattr(errors, "fl_started_at", lambda: None)  # no real ps
+    monkeypatch.setattr(errors, "_render_windows", [])
+    monkeypatch.setattr(render, "_restore_problems", [])
     monkeypatch.setattr(render, "shared_fl_files", lambda: [])

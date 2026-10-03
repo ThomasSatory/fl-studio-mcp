@@ -282,6 +282,8 @@ def _fl_state(conn) -> str:
     # system.info answers even behind FL's crash window; a real command does not.
     try:
         status = conn.send_command("transport.getStatus", None, 2.0)
+    except errors.FLCrashedError:
+        return "unsafe"
     except RuntimeError as e:
         return "unsafe" if errors.UNSAFE_MARKER in str(e) else "ok"
     if errors.UNSAFE_MARKER in str(status.get("error") or ""):
@@ -320,7 +322,8 @@ def save_project(conn, new_version: bool = False,
             return request
         except FLBusyError as e:
             # "Operation unsafe at current time": FL's crash window (or a modal) is open.
-            log = _new_crash_log(min(errors.last_ok(), request.requested))
+            log = (_new_crash_log(min(errors.last_ok(), request.requested))
+                   or getattr(e, "log", None))
             if log is not None:
                 raise fl_crashed_error(request.path_hint, log) from e
             raise fl_busy_or_crashed_error(request.path_hint, errors.UNSAFE_MARKER) from e
@@ -410,7 +413,7 @@ def locate_saved_project(request: SaveRequest, project_path: str | None = None,
         if state == "gone":
             raise fl_stopped_error(explicit or request.path_hint)
         if state == "unsafe":
-            log = _new_crash_log(request.requested)
+            log = _new_crash_log(request.requested) or errors.fresh_crash_log()
             if log is not None:
                 raise fl_crashed_error(explicit or request.path_hint, log)
             raise fl_busy_or_crashed_error(explicit or request.path_hint,

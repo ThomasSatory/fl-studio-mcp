@@ -357,6 +357,7 @@ def register_render_tools(mcp: FastMCP) -> None:
         conn = get_connection()
         path = await _in_thread(project_files.current_project_file, conn, save, project_path)
         data = path.read_bytes()
+        render.take_restore_problems()  # only this call's renders count
         notes = [
             "The render is of the saved .flp file, not of what is playing in FL.",
         ]
@@ -544,5 +545,8 @@ def register_render_tools(mcp: FastMCP) -> None:
 
         notes.append(f"WAV files are kept in {render.renders_dir()} (the 30 most recent); "
                      "play one with fl_preview_sample.")
+        unrestored = render.take_restore_problems()
+        if unrestored:
+            notes.append(render.restore_problems_note(unrestored))
         result["notes"] = notes
         return result

@@ -326,7 +326,8 @@ def register_channel_tools(mcp: FastMCP) -> None:
             channel: channel index (global)
             steps: [{"step": 0, "note": "C3" or "midi": 48, "velocity": 0-127,
                      "pan": -1..1, "shift": 0-1 (fraction of a step, swing/nudge;
-                     needs controller script version 5)}]
+                     needs controller script version 5; read back as written,
+                     check timing by ear or with fl_get_steps)}]
                    step 0 = first 16th of the pattern (16 steps per 4/4 bar).
                    Pitch defaults to 60 (C4 here; FL's UI calls it C5), which
                    plays a sample at its original pitch.
@@ -393,8 +394,9 @@ def register_channel_tools(mcp: FastMCP) -> None:
         return result
 
 
-# Controller version whose setSteps writes and verifies the shift safely
-# (version 6 verifies it more strictly, but 5 is safe).
+# Controller version whose setSteps writes the shift safely and reads it back
+# as written (version 6 compares it with the exact raw value it wrote, absolute
+# or relative form; which form FL really uses is not confirmed live yet).
 SHIFT_CONTROLLER_VERSION = 5
 
 

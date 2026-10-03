@@ -12,7 +12,16 @@ note colour presets, velocity curves), and the FL Studio the user works in
 then crashed at its next save (EAccessViolation in FLEngine, 4 runs in 5
 live; none in 6 with the guard). So the bytes of those files are taken
 before each render and every file the render changed is put back (deleted
-if it did not exist) as soon as the render process has exited.
+if it did not exist) as soon as the render process has exited. Whatever the
+main FL writes to those few files while a render runs is reverted with
+them. A file that could not be read before the render is left alone; a file
+that could not be put back is reported on stderr (never stdout: the server
+talks MCP over it) and in the render's notes (take_restore_problems).
+
+Before that guard, each render also added its temp project
+(.../flmcp-render-XXXX/<name>.flp) to FL's recent files, pushing the user's
+projects out of the list; after every render such lines are removed from
+"Recent files.scr" (forget_render_paths).
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -30,6 +40,7 @@ from pathlib import Path
 
 from fastmcp.exceptions import ToolError
 
+from fl_studio_mcp.utils import errors
 from fl_studio_mcp.utils.midi_connection import get_fl_settings_base
 
 RENDER_KEEP = 30
@@ -42,6 +53,14 @@ RENDER_DIR_ENV = "FL_STUDIO_MCP_RENDER_DIR"
 SIGNAL_RETRIES = 1
 
 _thread_lock = threading.Lock()
+
+# The render's temp folder (tempfile.mkdtemp prefix): recognisable in FL's recent files.
+TEMP_PREFIX = "flmcp-render-"
+RECENT_FILES = "Recent files.scr"
+UTF8_BOM = b"\xef\xbb\xbf"
+
+# Shared files a render changed and that could not be put back (see take_restore_problems).
+_restore_problems: list[Path] = []
 
 
 def shared_fl_files() -> list[tuple[Path, str]]:
@@ -56,7 +75,7 @@ def shared_fl_files() -> list[tuple[Path, str]]:
     """
     settings = get_fl_settings_base()
     files = [
-        (settings / "Browser", "Recent files.scr"),
+        (settings / "Browser", RECENT_FILES),
         (settings / "Browser", "SearchCache"),
         (settings / "Browser", "SearchCacheDate"),
         (settings / "Note color presets", "Auto saved.ncp"),
@@ -67,8 +86,12 @@ def shared_fl_files() -> list[tuple[Path, str]]:
     return files
 
 
-# path -> (bytes, (atime_ns, mtime_ns)), or None when the file did not exist.
-Snapshot = dict[Path, "tuple[bytes, tuple[int, int]] | None"]
+# Snapshot value of a file that exists but could not be read: left alone on restore.
+UNREADABLE = "unreadable"
+
+# path -> (bytes, (atime_ns, mtime_ns)), None when the file did not exist, or
+# UNREADABLE when it could not be read.
+Snapshot = dict[Path, "tuple[bytes, tuple[int, int]] | str | None"]
 
 
 def snapshot_shared_files() -> Snapshot:
@@ -84,18 +107,22 @@ def snapshot_shared_files() -> Snapshot:
             try:
                 st = path.stat()
                 snap[path] = (path.read_bytes(), (st.st_atime_ns, st.st_mtime_ns))
-            except OSError:
+            except FileNotFoundError:
                 snap[path] = None
+            except OSError:
+                snap[path] = UNREADABLE  # exists (maybe): never deleted nor rewritten
     return snap
 
 
-def restore_shared_files(snap: Snapshot) -> list[Path]:
+def restore_shared_files(snap: Snapshot, failed: list[Path] | None = None) -> list[Path]:
     """Put back every shared file whose bytes changed since `snap`; returns them.
 
     A file that did not exist before (or a new match of a guarded pattern)
-    is deleted. Nothing is printed: the server talks MCP over stdout.
+    is deleted; one that could not be read then is skipped. Files that could
+    not be put back are appended to `failed`. Nothing is printed here.
     """
     changed: list[Path] = []
+    failed = [] if failed is None else failed
     for folder, pattern in shared_fl_files():
         if any(ch in pattern for ch in "*?[") and folder.is_dir():
             for path in folder.glob(pattern):
@@ -104,13 +131,14 @@ def restore_shared_files(snap: Snapshot) -> list[Path]:
                         path.unlink()
                         changed.append(path)
                     except OSError:
-                        pass
+                        failed.append(path)
     for path, saved in snap.items():
-        if any(ch in path.name for ch in "*?["):
+        if any(ch in path.name for ch in "*?[") or saved == UNREADABLE:
             continue
         try:
             current = path.read_bytes() if path.exists() else None
         except OSError:
+            failed.append(path)
             continue
         if saved is None:
             if current is not None:
@@ -118,7 +146,7 @@ def restore_shared_files(snap: Snapshot) -> list[Path]:
                     path.unlink()
                     changed.append(path)
                 except OSError:
-                    pass
+                    failed.append(path)
             continue
         data, times = saved
         if current == data:
@@ -129,8 +157,71 @@ def restore_shared_files(snap: Snapshot) -> list[Path]:
             os.utime(path, ns=times)
             changed.append(path)
         except OSError:
-            pass
+            failed.append(path)
     return changed
+
+
+def take_restore_problems() -> list[Path]:
+    """Shared files that could not be put back since the last call (and forget them)."""
+    problems = list(dict.fromkeys(_restore_problems))
+    _restore_problems.clear()
+    return problems
+
+
+def restore_problems_note(paths: list[Path]) -> str:
+    """The render note for shared files that could not be put back."""
+    return ("FL Studio's renderer changed shared settings files that could not be put "
+            f"back: {', '.join(str(p) for p in paths)}. If FL Studio misbehaves, restart it.")
+
+
+def _stderr(message: str) -> None:
+    try:
+        print(f"fl-studio-mcp: {message}", file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+def _recent_files_paths() -> list[Path]:
+    return [folder / pattern for folder, pattern in shared_fl_files() if pattern == RECENT_FILES]
+
+
+def forget_render_paths(extra: list[str] | None = None) -> int:
+    """Drop the render's temp projects from FL's recent files; returns the lines removed.
+
+    A line goes when it holds the render temp folder prefix or the renders
+    folder (or a string of `extra`). The BOM, the order and every other line
+    are kept, and the file is only rewritten when a line went. Never raises:
+    a problem is noted on stderr.
+    """
+    markers = [TEMP_PREFIX, *(extra or [])]
+    try:
+        markers.append(str(renders_dir()))
+    except OSError:
+        pass
+    removed = 0
+    for path in _recent_files_paths():
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            _stderr(f"could not read {path} to remove render paths: {e}")
+            continue
+        try:
+            bom = raw.startswith(UTF8_BOM)
+            text = raw[len(UTF8_BOM):].decode("utf-8", "surrogateescape") if bom else \
+                raw.decode("utf-8", "surrogateescape")
+            lines = text.splitlines(keepends=True)
+            kept = [line for line in lines if not any(m in line for m in markers)]
+            if len(kept) == len(lines):
+                continue
+            data = (UTF8_BOM if bom else b"") + "".join(kept).encode("utf-8", "surrogateescape")
+            with open(path, "wb") as fh:  # in place: the user's FL may hold it open
+                fh.write(data)
+            removed += len(lines) - len(kept)
+        except (OSError, ValueError) as e:
+            _stderr(f"could not remove render paths from {path}: {e}")
+    return removed
 
 
 def find_fl_binary() -> Path:
@@ -320,6 +411,22 @@ def _run_renderer(binary: Path, flp: Path, timeout: float) -> int | None:
     return proc.returncode
 
 
+def _after_render(shared: Snapshot, work: Path) -> None:
+    """Put back FL's shared files and clean its recent files; never raises."""
+    failed: list[Path] = []
+    try:
+        restore_shared_files(shared, failed)
+    except Exception as e:  # noqa: BLE001 - a render must not fail on this
+        _stderr(f"could not put back FL's shared files after a render: {e}")
+    if failed:
+        _restore_problems.extend(failed)
+        _stderr("could not put back after a render: " + ", ".join(str(p) for p in failed))
+    try:
+        forget_render_paths([str(work)])
+    except Exception as e:  # noqa: BLE001
+        _stderr(f"could not clean FL's recent files after a render: {e}")
+
+
 def render_wav(
     flp_data: bytes, name: str, timeout: float, binary: Path | None = None
 ) -> Path:
@@ -328,7 +435,7 @@ def render_wav(
     name = _safe_name(name)
     out_dir = renders_dir()
     with _RenderLock(out_dir / ".render.lock"):
-        work = Path(tempfile.mkdtemp(prefix="flmcp-render-"))
+        work = Path(tempfile.mkdtemp(prefix=TEMP_PREFIX))
         try:
             flp = work / f"{name}.flp"
             flp.write_bytes(flp_data)
@@ -336,10 +443,11 @@ def render_wav(
             for attempt in range(SIGNAL_RETRIES + 1):
                 shared = snapshot_shared_files()
                 try:
-                    returncode = _run_renderer(binary, flp, timeout)
+                    with errors.render_window():
+                        returncode = _run_renderer(binary, flp, timeout)
                 finally:
                     # Also after a timeout (the renderer was killed) and before a retry.
-                    restore_shared_files(shared)
+                    _after_render(shared, work)
                 if _wrote_wav(wav):
                     break
                 if returncode is None or returncode >= 0:

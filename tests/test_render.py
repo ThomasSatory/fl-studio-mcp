@@ -286,3 +286,142 @@ def test_shared_files_live_in_fl_user_data(monkeypatch, tmp_path):
     names = [(folder.name, pattern) for folder, pattern in render.shared_fl_files()]
     assert ("Browser", "Recent files.scr") in names and ("Mapping", "*.env") in names
     assert ("Note color presets", "Auto saved.ncp") in names
+
+
+def test_a_file_unreadable_at_snapshot_is_never_deleted_or_rewritten(tmp_path, monkeypatch):
+    folder = tmp_path / "s"
+    folder.mkdir()
+    locked = folder / "reg.xml"
+    locked.write_text("user")
+    monkeypatch.setattr(render, "shared_fl_files", lambda: [(folder, "reg.xml")])
+    real = Path.read_bytes
+
+    def unreadable(self):
+        if self == locked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    snap = render.snapshot_shared_files()
+    monkeypatch.setattr(Path, "read_bytes", real)
+    assert snap[locked] == render.UNREADABLE
+    locked.write_text("changed by the main FL")
+    failed: list[Path] = []
+    assert render.restore_shared_files(snap, failed) == [] and failed == []
+    assert locked.read_text() == "changed by the main FL"
+
+
+def test_a_missing_file_is_recorded_as_missing_and_deleted_if_created(tmp_path, monkeypatch):
+    folder = tmp_path / "s"
+    folder.mkdir()
+    monkeypatch.setattr(render, "shared_fl_files", lambda: [(folder, "new")])
+    snap = render.snapshot_shared_files()
+    assert snap[folder / "new"] is None
+    (folder / "new").write_text("x")
+    assert render.restore_shared_files(snap) == [folder / "new"]
+    assert not (folder / "new").exists()
+
+
+@pytest.fixture
+def recent(tmp_path, monkeypatch):
+    folder = tmp_path / "Browser"
+    folder.mkdir()
+    monkeypatch.setattr(render, "shared_fl_files", lambda: [(folder, "Recent files.scr")])
+    monkeypatch.setenv("FL_STUDIO_MCP_RENDER_DIR", str(tmp_path / "renders"))
+    return folder / "Recent files.scr"
+
+
+def test_render_paths_are_removed_from_fl_recent_files(recent, tmp_path):
+    renders_dir = tmp_path / "renders"
+    lines = [
+        "/Users/me/Music/Song A.flp\r\n",
+        "/var/folders/xy/T/flmcp-render-ab12/Song A.flp\r\n",
+        "/Users/me/Music/Song B.flp\r\n",
+        f"{renders_dir}/old.flp\r\n",
+        "/Users/me/Music/Ünïcode.flp\r\n",
+    ]
+    recent.write_bytes(render.UTF8_BOM + "".join(lines).encode("utf-8"))
+    assert render.forget_render_paths() == 2
+    assert recent.read_bytes() == render.UTF8_BOM + "".join(
+        [lines[0], lines[2], lines[4]]).encode("utf-8")
+
+
+def test_recent_files_without_render_paths_are_not_rewritten(recent):
+    recent.write_bytes(render.UTF8_BOM + b"/Users/me/a.flp\n/Users/me/b.flp\n")
+    old = time.time() - 3600
+    os.utime(recent, (old, old))
+    assert render.forget_render_paths() == 0
+    assert abs(recent.stat().st_mtime - old) < 2
+
+
+def test_recent_files_errors_never_raise(recent, monkeypatch, capsys):
+    recent.write_bytes(b"/tmp/flmcp-render-1/x.flp\n")
+    real_open = open
+
+    def failing_open(path, mode="r", *args, **kwargs):
+        if Path(path) == recent and "w" in mode:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+    assert render.forget_render_paths() == 0
+    captured = capsys.readouterr()
+    assert captured.out == "" and "could not remove render paths" in captured.err
+
+
+def test_a_render_removes_its_temp_project_from_recent_files(env, recent, monkeypatch):
+    fake, _ = env
+    # The fake renderer writes its flp path into the file, like FL's render instance.
+    monkeypatch.setenv("FAKE_FL_SHARED", str(recent.parent))
+    recent.write_bytes(render.UTF8_BOM + b"/Users/me/song.flp\n/T/flmcp-render-old/s.flp\n")
+    assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+    assert recent.read_bytes() == render.UTF8_BOM + b"/Users/me/song.flp\n"
+
+
+def test_a_render_that_cannot_clean_recent_files_still_succeeds(env, monkeypatch):
+    fake, _ = env
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(render, "forget_render_paths", boom)
+    assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+
+
+def test_files_that_could_not_be_put_back_are_reported_on_stderr(env, monkeypatch, capsys):
+    fake, _ = env
+
+    def restore(snap, failed=None):
+        failed.append(Path("/fl/reg.xml"))
+        return []
+
+    monkeypatch.setattr(render, "restore_shared_files", restore)
+    assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1 and "/fl/reg.xml" in captured.err
+    assert render.take_restore_problems() == [Path("/fl/reg.xml")]
+    assert render.take_restore_problems() == []
+
+
+def test_a_crash_log_written_during_a_render_is_the_renderers(env, monkeypatch):
+    from fl_studio_mcp.utils import errors
+
+    fake, _ = env
+    folder = errors.crash_logs_dir()
+    folder.mkdir(parents=True)
+    real = render._run_renderer
+
+    def crashing_renderer(*args, **kwargs):
+        (folder / "Crash render.log").write_text("x")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(render, "_run_renderer", crashing_renderer)
+    start = time.time() - 1
+    assert render.render_wav(b"x", "s", 30, binary=fake).exists()
+    assert errors.crash_logs_since(start) == []
+    log = folder / "Crash main.log"
+    log.write_text("x")
+    later = time.time() + errors.RENDER_WINDOW_MARGIN + 1
+    os.utime(log, (later, later))
+    assert errors.crash_logs_since(start) == [log]

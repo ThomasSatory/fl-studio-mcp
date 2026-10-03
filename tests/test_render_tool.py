@@ -489,3 +489,17 @@ def test_trailing_silence_warning_names_the_marker_that_causes_it():
     assert plain.startswith("3.0 s of silence") and "marker" not in plain
     assert render_tool.trailing_silence_warning(project, 1.0) is None
     assert render_tool.trailing_silence_warning(None, None) is None
+
+
+def test_render_mix_notes_shared_files_that_could_not_be_put_back(tool, monkeypatch):
+    fl_render_mix, _, _, _ = tool
+    real = render_util.render_wav
+
+    def failing(*args, **kwargs):
+        render_util._restore_problems.append(Path("/fl/reg.xml"))
+        return real(*args, **kwargs)
+
+    render_util._restore_problems.append(Path("/stale/from/an/earlier/call"))
+    monkeypatch.setattr(render_util, "render_wav", failing)
+    notes = " ".join(fl_render_mix()["notes"])
+    assert "could not be put back: /fl/reg.xml." in notes and "/stale" not in notes

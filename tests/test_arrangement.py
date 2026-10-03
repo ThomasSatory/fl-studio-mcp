@@ -129,6 +129,15 @@ def test_get_arrangement_reads_bars(fl):
     assert result["markers"] == [{"bar": 1.0, "name": "Intro"}, {"bar": 9.0, "name": "Verse"}]
 
 
+def test_get_arrangement_song_length_counts_markers_like_fl(fl):
+    tools, _, path = fl
+    result = tools["fl_get_arrangement"](project_path=str(path))
+    clips_end = max(c["end_bar"] for t in result["tracks"] for c in t["clips"])
+    assert result["clips_end_bar"] == clips_end < 9.0
+    # The marker at bar 9 lies past the clips: FL's song is 8 bars long.
+    assert result["song_length_bars"] == 8.0
+
+
 def test_edit_arrangement_writes_backup_and_reloads(fl):
     tools, fake, path = fl
     result = tools["fl_edit_arrangement"](

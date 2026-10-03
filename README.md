@@ -537,13 +537,21 @@ a tool saves the project; the server refuses to save through an older script,
 and `fl_connection_status` warns about it. Version 5 is only required for
 `shift` in `fl_write_steps` (it now writes, reads back and checks every step
 parameter); it also reports pattern lengths in both steps and beats. Version 6
-checks a written shift strictly and rewrites a step FL left without its note.
+reads a written shift back as written (the exact raw value it wrote; whether FL
+plays it as an absolute or relative offset is not confirmed yet) and rewrites
+a step FL left without its note.
 
 Renders no longer make FL Studio crash: the command-line renderer is a second
 FL Studio that rewrites FL's shared settings files when it exits (reg.xml, the
 browser's recent files and search cache, note colour presets, velocity curves),
 after which the FL you work in crashed at its next save. `fl_render_mix` now
-puts back every such file the render changed.
+puts back every such file the render changed (a setting the FL you work in
+writes to one of those files during a render is reverted with it; a file that
+cannot be put back is listed in the render's `notes`). Earlier renders added
+their temp project (`.../flmcp-render-XXXX/<name>.flp`) to FL's recent files,
+pushing your projects out of the list; such lines are now removed after every
+render. A crash log written during a render is the renderer's and is no longer
+reported as FL Studio crashing.
 
 Saving is more careful: every save really saves (and so changes the file's
 modification time, also before an edit that turns out to change nothing). A
@@ -551,13 +559,18 @@ tool only takes the project file once FL has really written it (the file
 changed after the request and FL's `.flp~` temporary file is gone), waits 3 s
 after a reload it caused, and says so when FL Studio crashes during a save,
 including when FL stays open behind its crash window (a new crash log, or
-"Operation unsafe at current time", which other tools now explain too).
+"Operation unsafe at current time", which other tools now explain too). Any
+command FL refuses as unsafe while the running FL has written a crash log now
+reports the crash, also from read-only tools (FL keeps answering some reads
+behind its crash window).
 
 `fl_add_marker` refuses a position that already has a marker (FL would delete
 that marker and add nothing) and checks the new marker in the saved project.
 Song lengths count playlist markers like FL does: a marker past the last clip
 no longer raises a false `length_warning`, and `fl_render_mix` says when such
-a marker causes silence at the end of the render.
+a marker causes silence at the end of the render. `fl_get_arrangement`'s
+`song_length_bars` is that length too (it counted clips only), and
+`clips_end_bar` is where the last clip ends.
 
 `length_beats` from `fl_list_patterns` is now in beats (it was FL's 16th-step
 count, 4x too big, so `place` without `length_bars` placed 4x too long);

@@ -170,3 +170,121 @@ def test_crash_logs_before_the_last_successful_command_are_old(monkeypatch):
     with pytest.raises(errors.FLBusyError) as e:
         errors.unwrap({"success": False, "error": "Operation unsafe at current time"})
     assert not isinstance(e.value, errors.FLCrashedError)
+
+
+class _Midi:
+    def __init__(self, answer):
+        self.answer = answer
+
+    def send_command(self, action, params=None, timeout=2.0):
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return dict(self.answer)
+
+
+def _connection(monkeypatch, answer):
+    import fl_studio_mcp.utils.connection as connection
+
+    monkeypatch.setattr(connection, "get_midi_connection", lambda: _Midi(answer))
+    return connection.FLConnection()
+
+
+def _crash_log(age: float = 0.0):
+    import os
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    folder = errors.crash_logs_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    log = folder / f"Crash {age}.log"
+    log.write_text("x")
+    when = time.time() - age
+    os.utime(log, (when, when))
+    return log
+
+
+def test_connection_reports_the_crash_window_for_any_command(monkeypatch):
+    from fl_studio_mcp.utils import errors
+
+    unsafe = {"success": False, "error": "Operation unsafe at current time"}
+    conn = _connection(monkeypatch, unsafe)
+    assert conn.send_command("mixer.getTrackInfo") == unsafe  # no crash log: a modal
+    log = _crash_log()
+    with pytest.raises(errors.FLCrashedError, match="FL Studio crashed") as e:
+        conn.send_command("mixer.getTrackInfo")
+    assert e.value.log == log
+
+
+def test_connection_reports_the_crash_window_from_a_connection_error(monkeypatch):
+    from fl_studio_mcp.utils import errors
+
+    conn = _connection(monkeypatch, RuntimeError("Operation unsafe at current time"))
+    _crash_log()
+    with pytest.raises(errors.FLCrashedError):
+        conn.send_command("channels.getAll")
+
+
+def test_reads_answered_after_the_crash_do_not_hide_its_log(monkeypatch):
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    # FL crashed 60 s ago, after it started; reads kept answering since then.
+    monkeypatch.setattr(errors, "fl_started_at", lambda: time.time() - 3600)
+    _crash_log(age=60)
+    errors.note_answer("mixer.getTrackInfo", {"success": True})
+    conn = _connection(monkeypatch, {"success": False,
+                                     "error": "Operation unsafe at current time"})
+    with pytest.raises(errors.FLCrashedError):
+        conn.send_command("patterns.getAll")
+
+
+def test_a_crash_log_older_than_the_running_fl_is_not_its_crash(monkeypatch):
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    monkeypatch.setattr(errors, "fl_started_at", lambda: time.time() - 30)
+    _crash_log(age=600)  # the FL that ran before this one
+    unsafe = {"success": False, "error": "Operation unsafe at current time"}
+    conn = _connection(monkeypatch, unsafe)
+    assert conn.send_command("patterns.getAll") == unsafe
+    with pytest.raises(errors.FLBusyError) as e:
+        errors.unwrap(unsafe)
+    assert not isinstance(e.value, errors.FLCrashedError)
+
+
+def test_crash_logs_written_during_a_render_are_ignored(monkeypatch):
+    from fl_studio_mcp.utils import errors
+
+    conn = _connection(monkeypatch, {"success": False,
+                                     "error": "Operation unsafe at current time"})
+    with errors.render_window():
+        _crash_log()
+    assert conn.send_command("patterns.getAll")["success"] is False
+
+
+def test_successful_answers_are_not_checked(monkeypatch):
+    conn = _connection(monkeypatch, {"success": True, "value": 1})
+    _crash_log()
+    assert conn.send_command("mixer.getTrackInfo")["value"] == 1
+
+
+def test_fl_started_at_parses_ps(monkeypatch):
+    import subprocess
+    import time
+
+    from fl_studio_mcp.utils import errors
+
+    monkeypatch.undo()  # the conftest stub
+    monkeypatch.setattr(errors.platform, "system", lambda: "Darwin")
+
+    def fake_run(cmd, **kwargs):
+        out = "12\n34\n" if cmd[0] == "pgrep" else (
+            "Sat Oct  3 16:05:49 2026\nSun Sep 20 16:04:33 2026\n")
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(errors.subprocess, "run", fake_run)
+    expected = time.mktime(time.strptime("Sun Sep 20 16:04:33 2026", "%a %b %d %H:%M:%S %Y"))
+    assert errors.fl_started_at() == expected

@@ -355,7 +355,9 @@ def describe(project: Project, arrangement, patterns: dict[int, dict] | None = N
         "time_signature": f"{num}/{beat}",
         "ppq": project.ppq,
         "arrangement": {"index": arrangement.index, "name": arrangement.name},
-        "song_length_bars": timeline.bars(end),
+        # FL's song length counts markers past the last clip (as fl_edit_arrangement).
+        "song_length_bars": timeline.bars(song_end(arrangement.clips, arrangement.markers)),
+        "clips_end_bar": timeline.bar(end),
         "clip_count": len(arrangement.clips),
         "markers": [{"bar": timeline.bar(m.position), "name": m.name}
                     for m in sorted(arrangement.markers, key=lambda m: m.position)],
@@ -536,6 +538,9 @@ def register_arrangement_tools(mcp: FastMCP) -> None:
 
         FL's API cannot read clips, so the project is saved first (Ctrl+S) and
         its file is read. Bars are 1-based like FL's ruler, tracks 1-based.
+        song_length_bars is FL's song length, which counts playlist markers past
+        the last clip (as fl_edit_arrangement reports it); clips_end_bar is
+        where the last clip ends.
 
         Args:
             track: only list this playlist track (1-based)
