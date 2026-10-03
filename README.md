@@ -400,8 +400,10 @@ instead of guessing. It saves the project (Ctrl+S) and runs FL Studio's
 command-line renderer (`OsxFL -R -Ewav` on macOS) on a copy of the **saved**
 file, in the background: the open FL Studio is not touched. A render takes
 about 20 s for the whole song, plus about 20 s per stem, and renders run one
-at a time. The WAV is analysed as a whole (integrated and short-term LUFS
-per ITU-R BS.1770, sample and true peak, RMS, crest factor, samples over
+at a time. The tool reports progress after each render; with an MCP client
+that gives up on a tool call after 60 s, ask for 1 or 2 stems per call.
+The WAV is analysed as a whole (integrated and short-term LUFS per ITU-R
+BS.1770, sample and true peak, RMS, crest factor, samples over
 0 dBFS, energy in 5 bands, stereo width and correlation, silence at both
 ends) and section by section: the playlist markers of the current
 arrangement, or 8-bar blocks without markers. Section times come from the
@@ -412,13 +414,19 @@ mixer inserts alone and compares them: level, band balance, share of the mix
 energy, two tracks fighting in the low end, a track that dominates or is
 silent. FL's renderer ignores solo flags, so each stem is a copy of the
 project where every insert unrelated to the target is disabled (the target
-keeps the inserts feeding it and the buses it feeds). Channels routed straight
-to the Master are in every stem; the tool says so.
+keeps the inserts feeding it and the buses it feeds). The inserts feeding it
+lose their other routes in that copy, and sidechain routes (level 0, read from
+the running FL) are not followed, so other tracks do not leak in. Channels
+routed straight to the Master, or straight into a bus the stem keeps, are
+still in that stem; the tool says so (`also_contains`, `stem_warnings`). A bus
+stem is not compared with the tracks it contains.
 
 The WAV files stay in the renders folder (the 30 most recent are kept, see
 `FL_STUDIO_MCP_RENDER_DIR`); `fl_preview_sample` plays one. A render that
 takes too long is stopped: FL is probably waiting on a dialog (missing
-plugin, demo limitation). Verified on macOS with FL Studio 2025; the Windows
+plugin, missing sample, demo limitation). The render runs on a copy of the
+project in a temp folder, so samples FL would find relative to the project
+folder can be reported missing. Verified on macOS with FL Studio 2025; the Windows
 command (`FL64.exe /R /Ewav <file>`) is Image-Line's documented form but has
 not been tested.
 

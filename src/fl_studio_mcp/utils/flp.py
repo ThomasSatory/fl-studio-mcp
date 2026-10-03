@@ -719,10 +719,18 @@ def mixer_routes(project: Project) -> dict[int, set[int]]:
     return routes
 
 
+def _flags_value(event: Event, index: int) -> int:
+    raw = event.value
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) < 8:
+        raise FLPError(f"mixer insert {index} has a flags event shorter than 8 bytes")
+    return struct.unpack_from("<I", raw, 4)[0]
+
+
 def disable_inserts(project: Project, indices) -> None:
     """Clear the Enabled bit of these inserts. FLPError for 0 (Master), for the last
     insert (FL 2025's 'Current' track: disabling it makes the render write nothing),
-    for an index out of range, or when the file has no 236 events."""
+    for an index out of range, when the file has no 236 events, or when an insert's
+    236 value is shorter than 8 bytes."""
     flags = [e for e in project.events if e.id == EV_INSERT_FLAGS]
     if not flags:
         raise FLPError("the project has no mixer insert events")
@@ -734,47 +742,105 @@ def disable_inserts(project: Project, indices) -> None:
             raise FLPError(f"cannot disable insert {index}: it is the 'Current' track")
         if not 0 <= index < len(flags):
             raise FLPError(f"insert {index} out of range (0..{len(flags) - 1})")
+        _flags_value(flags[index], index)
     for index in wanted:
         event = flags[index]
         raw = bytearray(event.value)
-        value = struct.unpack_from("<I", raw, 4)[0] & ~INSERT_ENABLED
+        value = _flags_value(event, index) & ~INSERT_ENABLED
         struct.pack_into("<I", raw, 4, value)
         event.value = bytes(raw)
 
 
-def stem_keep_set(routes: dict[int, set[int]], target: int) -> set[int]:
-    """{0, target} | inserts whose signal reaches target | inserts reached from target."""
-    keep = {0, target}
-    # upstream: walk the routes backwards from the target
+def zero_routes(project: Project, cut: dict[int, set[int]]) -> None:
+    """Remove routes in place: cut[source] = destinations whose byte is zeroed in the
+    source insert's 235 event. The event keeps its length; a destination past its end
+    has no route already. FLPError for a source with no 235 event."""
+    routing = [e for e in project.events if e.id == EV_INSERT_ROUTING]
+    for source, dests in cut.items():
+        if not 0 <= source < len(routing):
+            raise FLPError(f"insert {source} has no routing event")
+        event = routing[source]
+        raw = bytearray(event.value)
+        for dest in dests:
+            if 0 <= dest < len(raw):
+                raw[dest] = 0
+        event.value = bytes(raw)
+
+
+def upstream_inserts(routes: dict[int, set[int]], target: int) -> set[int]:
+    """Inserts whose routes reach target (target excluded unless in a loop)."""
+    found: set[int] = set()
     stack = [target]
     while stack:
         node = stack.pop()
         for source, dests in routes.items():
-            if node in dests and source not in keep:
-                keep.add(source)
+            if node in dests and source not in found and source != target:
+                found.add(source)
                 stack.append(source)
-    # downstream: follow the routes forwards from the target
+    return found
+
+
+def downstream_inserts(routes: dict[int, set[int]], target: int,
+                       audio_routes: dict[int, set[int]] | None = None) -> set[int]:
+    """Inserts reached from target (target excluded). audio_routes, when given, replaces
+    routes for the inserts it lists: routes that carry audio (a level-0 sidechain route
+    does not), as reported by the running FL."""
+    def out(node: int):
+        if audio_routes is not None and node in audio_routes:
+            return audio_routes[node]
+        return routes.get(node, ())
+
+    found: set[int] = set()
     stack = [target]
-    seen = {target}
     while stack:
         node = stack.pop()
-        for dest in routes.get(node, ()):
-            if dest not in seen:
-                seen.add(dest)
-                keep.add(dest)
+        for dest in out(node):
+            if dest != target and dest not in found:
+                found.add(dest)
                 stack.append(dest)
-    return keep
+    return found
 
 
-def stem_project_bytes(data: bytes, target: int) -> bytes:
-    """A copy of the project where every insert outside stem_keep_set(target) is disabled.
-    Never touches 0 or the last insert. FLPError if target is 0, the last insert or out of range."""
+def stem_keep_set(routes: dict[int, set[int]], target: int,
+                  audio_routes: dict[int, set[int]] | None = None) -> set[int]:
+    """{0, target} | inserts whose signal reaches target | inserts reached from target.
+
+    The upstream walk uses the file's routes; the downstream walk uses audio_routes
+    where given (see downstream_inserts), so a sidechain target is not kept."""
+    return ({0, target} | upstream_inserts(routes, target)
+            | downstream_inserts(routes, target, audio_routes))
+
+
+def stem_project_bytes(data: bytes, target: int,
+                       audio_routes: dict[int, set[int]] | None = None) -> bytes:
+    """A copy of the project rendering only target and what it needs.
+
+    Every insert outside stem_keep_set(target) is disabled, and each kept upstream
+    insert (feeding target, not on its downstream chain) loses its routes to any
+    insert other than target and the other upstream inserts, so its signal reaches
+    the Master only through target. Never disables 0 or the last insert, nor cuts
+    their routes. FLPError if target is 0, the last insert or out of range, or when
+    the 235 and 236 event counts differ."""
     project = Project.parse(data)
     count = insert_count(project)
     if count == 0:
         raise FLPError("the project has no mixer insert events")
+    routing_count = sum(1 for e in project.events if e.id == EV_INSERT_ROUTING)
+    if routing_count != count:
+        raise FLPError(f"the project has {count} mixer flag events but {routing_count} "
+                       "routing events")
     if not 0 < target < count - 1:
         raise FLPError(f"insert {target} cannot be soloed (valid: 1..{count - 2})")
-    keep = stem_keep_set(mixer_routes(project), target)
+    routes = mixer_routes(project)
+    up = upstream_inserts(routes, target)
+    down = downstream_inserts(routes, target, audio_routes)
+    keep = {0, target} | up | down
     disable_inserts(project, [i for i in range(1, count - 1) if i not in keep])
+    allowed = up | {target}
+    cut = {}
+    for source in up - down - {0, target, count - 1}:
+        extra = routes.get(source, set()) - allowed
+        if extra:
+            cut[source] = extra
+    zero_routes(project, cut)
     return project.to_bytes()

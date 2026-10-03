@@ -469,7 +469,10 @@ def compare_stems(stems: list[dict]) -> list[str]:
     """Warnings across per-track stems: silent tracks, low-end masking, one track dominating.
 
     Each stem: {"track", "name", "lufs", "bands", "silent"} and optionally
-    "share_pct" (its share of the mix energy).
+    "share_pct" (its share of the mix energy) and "inserts" (the mixer inserts
+    left playing in its render). Two stems where one's inserts include the
+    other's track (a bus and a track feeding it) are not compared: the bus
+    contains that track.
     """
     def label(s: dict) -> str:
         name = s.get("name")
@@ -478,6 +481,10 @@ def compare_stems(stems: list[dict]) -> list[str]:
     def short(s: dict) -> str:
         return s.get("name") or f"track {s.get('track')}"
 
+    def related(a: dict, b: dict) -> bool:
+        return (a.get("track") in (b.get("inserts") or ())
+                or b.get("track") in (a.get("inserts") or ()))
+
     w = []
     for s in stems:
         if s.get("silent"):
@@ -485,7 +492,7 @@ def compare_stems(stems: list[dict]) -> list[str]:
     live = [s for s in stems if not s.get("silent") and s.get("lufs") is not None]
     for i, a in enumerate(live):
         for b in live[i + 1:]:
-            if abs(a["lufs"] - b["lufs"]) >= 6:
+            if related(a, b) or abs(a["lufs"] - b["lufs"]) >= 6:
                 continue
             ba, bb = a.get("bands") or {}, b.get("bands") or {}
             shared = [band for band in ("sub", "low")
@@ -494,13 +501,18 @@ def compare_stems(stems: list[dict]) -> list[str]:
                 band = max(shared, key=lambda n: ba[n] + bb[n])
                 w.append(f"{short(a)} and {short(b)} both carry most of their energy in "
                          f"{band}: they mask each other; sidechain or EQ one of them")
-    if len(live) >= 2:
-        ranked = sorted(live, key=lambda s: s["lufs"], reverse=True)
-        top, second = ranked[0], ranked[1]
-        lead = top["lufs"] - second["lufs"]
+    # The loudest stem that has something to be compared with: every louder stem
+    # is related to all the others (a bus containing them).
+    ranked = sorted(live, key=lambda s: s["lufs"], reverse=True)
+    for top in ranked:
+        others = [s for s in ranked if s is not top and not related(top, s)]
+        if not others:
+            continue
+        lead = top["lufs"] - max(s["lufs"] for s in others)
         share = top.get("share_pct")
         if lead >= 3 and (share is None or share > 60):
             extra = f", {round(share)}% of the mix energy" if share is not None else ""
             w.append(f"{label(top)} dominates: {round(lead, 1)} LU louder than any other "
                      f"track{extra}; the rest may be buried")
+        break
     return w

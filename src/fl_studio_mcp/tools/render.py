@@ -10,10 +10,13 @@ the renderer ignores solo flags.
 
 from __future__ import annotations
 
+import functools
 import math
 import time
 from typing import TYPE_CHECKING, Any
 
+import anyio.to_thread
+from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools.annotations import ACTION
@@ -135,7 +138,7 @@ def resolve_stems(spec: Any, routes: dict[int, set[int]], channel_targets: list[
     a single send or sidechain target is not a bus). channel_targets should
     leave out automation-clip channels. At most MAX_STEMS per call.
     """
-    if spec is None:
+    if spec is None or (isinstance(spec, (list, tuple)) and not spec):
         return []
     if isinstance(spec, str):
         direct, buses = _used_and_buses(routes, channel_targets, last_insert)
@@ -173,16 +176,56 @@ def _energy(rms_dbfs: float | None) -> float:
     return 10 ** (rms_dbfs / 10) if rms_dbfs is not None else 0.0
 
 
+def live_audio_routes(conn: Any, target: int) -> dict[int, set[int]]:
+    """Routes carrying audio from target and every insert it reaches, from the running FL.
+
+    Asks mixer.getRouting for target, then for each insert found downstream
+    (breadth first). A route with level 0 is a sidechain-only route and is left
+    out; a route without a level (FL API < 36) counts as audio. Raises ToolError
+    (or ValueError/TypeError/KeyError on a malformed answer) when FL cannot answer.
+    """
+    audio: dict[int, set[int]] = {}
+    queue = [target]
+    while queue:
+        node = queue.pop(0)
+        if node in audio:
+            continue
+        answer = run(conn, "mixer.getRouting", {"track": node})
+        dests = set()
+        for route in answer.get("routes") or []:
+            level = route.get("level")
+            if level is not None and float(level) <= 0.0:
+                continue
+            dests.add(int(route["to"]))
+        audio[node] = dests
+        queue.extend(d for d in sorted(dests) if d not in audio)
+    return audio
+
+
+async def _in_thread(fn, *args, **kwargs):
+    return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+
+async def _progress(ctx: Context | None, done: int, total: int, message: str) -> None:
+    if ctx is None:
+        return
+    try:
+        await ctx.report_progress(progress=done, total=total, message=message)
+    except Exception:  # noqa: BLE001 - progress is a courtesy, never a failure
+        pass
+
+
 def register_render_tools(mcp: FastMCP) -> None:
     """Register fl_render_mix with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
 
     @mcp.tool(annotations=ACTION)
-    def fl_render_mix(
+    async def fl_render_mix(
         stems: list[int] | str | None = None,
         sections: bool = True,
         save: bool = True,
         project_path: str | None = None,
+        ctx: Context | None = None,
     ) -> dict:
         """Render the song to WAV with FL Studio and measure the mix: listen to your work.
 
@@ -190,6 +233,7 @@ def register_render_tools(mcp: FastMCP) -> None:
         instead of guessing. It saves the project (Ctrl+S) and renders the
         SAVED file in the background with FL's command-line renderer: about
         20 s for the whole song, plus about 20 s per stem, one render at a time.
+        If your client stops waiting after 60 s, ask for 1 or 2 stems per call.
 
         Returns overall loudness (integrated LUFS, short-term max), sample and
         true peak, RMS, crest factor, samples over 0 dBFS, the energy in 5
@@ -201,12 +245,15 @@ def register_render_tools(mcp: FastMCP) -> None:
         louder than the rest, a band share that is way off for the genre.
 
         Stems answer "which track causes it": each requested mixer insert is
-        rendered alone (with the buses it feeds and the inserts feeding it)
-        and compared: level, bands, share of the mix energy, masking in the
-        low end, silent tracks. The WAVs stay in the renders folder; play one
-        with fl_preview_sample. Each stem gives track, name, path, lufs,
-        peak_dbfs, share_pct (its energy as a % of the mix) and silent;
-        stem_warnings carries masking, dominant and silent tracks.
+        rendered alone (with the buses it feeds and the inserts feeding it;
+        sidechain routes are not followed) and compared: level, bands, share
+        of the mix energy, masking in the low end, silent tracks. A bus stem
+        is not compared with the tracks it contains. The WAVs stay in the
+        renders folder; play one with fl_preview_sample. Each stem gives
+        track, name, path, lufs, peak_dbfs, share_pct (its energy as a % of
+        the mix), silent, inserts (mixer inserts left playing) and, when a
+        kept bus also has its own channels, also_contains; stem_warnings
+        carries masking, dominant and silent tracks and leaks.
 
         Args:
             stems: mixer inserts to render alone - a list like [1, 3], "all"
@@ -216,8 +263,10 @@ def register_render_tools(mcp: FastMCP) -> None:
             save: save first so the render matches FL (default True)
             project_path: the open project's .flp, when it cannot be found automatically
         """
+        if isinstance(stems, (list, tuple)) and not stems:
+            stems = None
         conn = get_connection()
-        path = project_files.current_project_file(conn, save, project_path)
+        path = await _in_thread(project_files.current_project_file, conn, save, project_path)
         data = path.read_bytes()
         notes = [
             "The render is of the saved .flp file, not of what is playing in FL.",
@@ -246,7 +295,8 @@ def register_render_tools(mcp: FastMCP) -> None:
             elif flp.insert_count(project) < 3:
                 stems_refused = "the project file has no mixer inserts to render alone"
             else:
-                channels = run(conn, "channels.getAll").get("channels", [])
+                answer = await _in_thread(run, conn, "channels.getAll")
+                channels = answer.get("channels", [])
                 automation = {a.channel for a in flp.automation_clips(project)}
                 channels = [c for c in channels
                             if c.get("type") != "automation_clip"
@@ -261,13 +311,15 @@ def register_render_tools(mcp: FastMCP) -> None:
         if project is not None and not tempo:
             # FL 2025 files may store no tempo event: ask the running FL.
             try:
-                tempo = float(run(conn, "transport.getTempo").get("tempo") or 0) or None
+                answer = await _in_thread(run, conn, "transport.getTempo")
+                tempo = float(answer.get("tempo") or 0) or None
             except (ToolError, TypeError, ValueError):
                 tempo = None
         length = song_seconds(project, tempo) if project is not None else None
         timeout = render.render_timeout(length)
+        total = 1 + len(targets)
         started = time.monotonic()
-        wav = render.render_wav(data, path.stem, timeout)
+        wav = await _in_thread(render.render_wav, data, path.stem, timeout)
         elapsed = round(time.monotonic() - started, 1)
 
         bounds = None
@@ -282,7 +334,9 @@ def register_render_tools(mcp: FastMCP) -> None:
             elif bounds:
                 notes.append("Section times come from the project tempo; tempo automation "
                              "shifts them.")
-        analysis = mix_analysis.analyze_mix(wav, bounds)
+        analysis = await _in_thread(mix_analysis.analyze_mix, wav, bounds)
+        await _progress(ctx, 1, total, "Mix rendered and analysed"
+                        + (f"; rendering {len(targets)} stem(s)" if targets else ""))
 
         result: dict[str, Any] = {
             "project": str(path),
@@ -297,23 +351,41 @@ def register_render_tools(mcp: FastMCP) -> None:
                 stem_warnings.append(f"Stems not rendered: {stems_refused}.")
             else:
                 try:
-                    tracks = run(conn, "mixer.getAllTracks", {"include_empty": True})
+                    tracks = await _in_thread(
+                        run, conn, "mixer.getAllTracks", {"include_empty": True})
                     names = {int(t["index"]): t.get("name") or f"Insert {t['index']}"
                              for t in tracks.get("tracks", [])}
                 except (ToolError, KeyError, TypeError, ValueError):
                     names = {}
-                for t in targets:
-                    name = names.get(t, f"Insert {t}")
+                routes = flp.mixer_routes(project)
+                last = flp.insert_count(project) - 1
+                routing_failed = False
+
+                def render_stem(t: int, name: str) -> dict:
+                    nonlocal routing_failed
                     try:
-                        stem_data = flp.stem_project_bytes(data, t)
-                        stem_wav = render.render_wav(
-                            stem_data, f"{path.stem} - stem {t} {name}", timeout)
-                        overall = mix_analysis.analyze_mix(stem_wav)["overall"]
-                    except (ToolError, FLPError) as e:
-                        stem_warnings.append(f"stem {t} ({name}) not rendered: {e}")
-                        continue
+                        audio = live_audio_routes(conn, t)
+                    except (ToolError, KeyError, TypeError, ValueError):
+                        audio = None
+                        routing_failed = True
+                    stem_data = flp.stem_project_bytes(data, t, audio)
+                    stem_wav = render.render_wav(
+                        stem_data, f"{path.stem} - stem {t} {name}", timeout)
+                    overall = mix_analysis.analyze_mix(stem_wav)["overall"]
                     peak = overall.get("peak_dbfs")
-                    out.append({
+                    keep = flp.stem_keep_set(routes, t, audio)
+                    down = flp.downstream_inserts(routes, t, audio)
+                    also = []
+                    for d in sorted(down - {0, t, last}):
+                        fed = [c for c in channels if int(c.get("target_fx_track") or 0) == d]
+                        if fed:
+                            also.append({
+                                "track": d,
+                                "name": names.get(d, f"Insert {d}"),
+                                "channels": [str(c.get("name") or f"channel {c.get('index')}")
+                                             for c in fed],
+                            })
+                    entry = {
                         "track": t,
                         "name": name,
                         "path": str(stem_wav),
@@ -323,13 +395,37 @@ def register_render_tools(mcp: FastMCP) -> None:
                         "rms_dbfs": overall.get("rms_dbfs"),
                         "bands": overall.get("bands"),
                         "silent": peak is None or peak < mix_analysis.SILENCE_DBFS,
-                    })
+                        "inserts": sorted(keep - {0, last}),
+                    }
+                    if also:
+                        entry["also_contains"] = also
+                    return entry
+
+                for n, t in enumerate(targets, start=1):
+                    name = names.get(t, f"Insert {t}")
+                    try:
+                        entry = await _in_thread(render_stem, t, name)
+                    except Exception as e:  # noqa: BLE001 - one stem never sinks the call
+                        stem_warnings.append(
+                            f"stem {t} ({name}) not rendered: {type(e).__name__}: {e}")
+                        await _progress(ctx, 1 + n, total, f"Stem {t} ({name}) failed")
+                        continue
+                    out.append(entry)
+                    for leak in entry.get("also_contains", []):
+                        stem_warnings.append(
+                            f"stem {t} ({name}) also contains insert {leak['track']} "
+                            f"({leak['name']}), which it feeds and which has its own "
+                            f"channel(s): {', '.join(leak['channels'])}")
+                    await _progress(ctx, 1 + n, total, f"Stem {t} ({name}) rendered")
+                if routing_failed:
+                    notes.append("FL did not report the mixer routing, so the stems follow "
+                                 "the routes saved in the file: a sidechain-only route may "
+                                 "pull its destination into a stem.")
                 mix_energy = _energy(analysis["overall"].get("rms_dbfs"))
                 for s in out:
                     s["share_pct"] = (round(100 * _energy(s["rms_dbfs"]) / mix_energy, 1)
                                       if mix_energy > 0 else None)
                 # Master and the last insert ('Current') are never disabled.
-                last = flp.insert_count(project) - 1
                 always = [c for c in channels
                           if int(c.get("target_fx_track") or 0) in (0, last)]
                 if always:

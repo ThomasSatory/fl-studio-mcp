@@ -354,6 +354,48 @@ def test_compare_stems_no_conflict_when_far_apart_and_dominant_track():
     assert not any("dominates" in w for w in ma.compare_stems(stems))
 
 
+def test_compare_stems_skips_a_bus_and_its_sources():
+    stems = [
+        {"track": 1, "name": "Kick", "lufs": -12.0, "bands": {"sub": 60}, "silent": False,
+         "inserts": [1, 3]},
+        {"track": 2, "name": "Bass", "lufs": -20.0, "bands": {"sub": 60}, "silent": False,
+         "inserts": [2, 3]},
+        {"track": 3, "name": "Bus 1", "lufs": -8.0, "bands": {"sub": 60}, "silent": False,
+         "share_pct": 90, "inserts": [1, 2, 3]},
+        {"track": 4, "name": "Sub", "lufs": -13.0, "bands": {"sub": 70}, "silent": False,
+         "share_pct": 20, "inserts": [4]},
+    ]
+    warnings = ma.compare_stems(stems)
+    for source in ("Kick", "Bass"):
+        assert not any(f"{source} and Bus 1" in w or f"Bus 1 and {source}" in w
+                       for w in warnings)
+    assert any(w.startswith("Kick and Sub both carry") for w in warnings)
+    assert any(w.startswith("Bus 1 and Sub both carry") for w in warnings)
+    assert not any("Kick and Bass" in w for w in warnings)  # 8 LU apart
+    # the bus is compared with Sub only: 5 LU louder
+    assert any(w.startswith("track 3 (Bus 1) dominates: 5.0 LU") for w in warnings)
+    # without "inserts", the old behaviour: the bus is compared with everyone
+    plain = [{k: v for k, v in s.items() if k != "inserts"} for s in stems]
+    warnings = ma.compare_stems(plain)
+    assert any("Kick and Bus 1" in w for w in warnings)
+    assert any(w.startswith("track 3 (Bus 1) dominates: 4.0 LU") for w in warnings)
+
+
+def test_compare_stems_dominance_skips_stems_related_to_all():
+    stems = [
+        {"track": 3, "name": "Bus", "lufs": -6.0, "bands": {}, "silent": False,
+         "inserts": [1, 2, 3]},
+        {"track": 1, "name": "Kick", "lufs": -8.0, "bands": {}, "silent": False,
+         "inserts": [1, 3]},
+        {"track": 2, "name": "Hat", "lufs": -20.0, "bands": {}, "silent": False,
+         "inserts": [2, 3]},
+    ]
+    warnings = ma.compare_stems(stems)
+    assert [w for w in warnings if "dominates" in w] == [
+        "track 1 (Kick) dominates: 12.0 LU louder than any other track; "
+        "the rest may be buried"]
+
+
 # -------------------------------------------------------------------- perf
 
 

@@ -206,7 +206,9 @@ def render_wav(
                     raise ToolError(
                         f"FL Studio did not finish rendering within {timeout:g} s and "
                         "was stopped. It may be waiting on a dialog (missing plugin, "
-                        "demo limitation); open the project in FL to check."
+                        "missing sample, demo limitation): the render runs on a copy "
+                        "in a temp folder, so samples FL finds relative to the "
+                        "project folder may be missing; open the project in FL to check."
                     ) from None
             finally:
                 _stop(proc)

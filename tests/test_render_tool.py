@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import functools
 import struct
 import wave
 from pathlib import Path
 
+import anyio
 import numpy as np
 import pytest
 from fastmcp.exceptions import ToolError
 
 from fl_studio_mcp.tools import render as render_tool
-from fl_studio_mcp.utils import project_files
+from fl_studio_mcp.utils import flp, mix_analysis, project_files
 from fl_studio_mcp.utils import render as render_util
 from fl_studio_mcp.utils.flp import INSERT_ENABLED, Event, Project, encode_text
 from tests.fakes import RecordingMCP
@@ -94,6 +96,7 @@ LAST = 4
 
 def test_resolve_explicit_list():
     assert render_tool.resolve_stems(None, ROUTES, [1, 2], LAST) == []
+    assert render_tool.resolve_stems([], ROUTES, [1, 2], LAST) == []
     assert render_tool.resolve_stems([3, 1, 3], ROUTES, [1, 2], LAST) == [3, 1]
     for bad in ([0], [4], [9], [True], ["1"]):
         with pytest.raises(ToolError, match="not a usable mixer insert"):
@@ -151,9 +154,20 @@ class FakeFL:
     def __init__(self):
         self.calls = []
         self.tempo = 120.0
+        # live routing: track -> {dest: level}; None makes mixer.getRouting fail
+        self.routing: dict[int, dict[int, float]] | None = {
+            t: {d: 0.8 for d in dests} for t, dests in ROUTES.items()}
+        self.extra_channels: list[dict] = []
 
     def send_command(self, action, params=None, timeout=2.0):
         self.calls.append(action)
+        if action == "mixer.getRouting":
+            if self.routing is None:
+                return {"success": False, "error": "mixer.getRouting unavailable"}
+            track = params["track"]
+            return {"success": True, "track": track, "routes": [
+                {"to": d, "name": f"Insert {d}", "level": level}
+                for d, level in self.routing.get(track, {}).items()]}
         if action == "system.info":
             return {"success": True, "controller_version": 3}
         if action == "transport.getTempo":
@@ -166,7 +180,7 @@ class FakeFL:
                 {"index": 3, "name": "Fade out", "type": "automation_clip",
                  "target_fx_track": 0},
                 {"index": 4, "name": "Vox", "type": "audio_clip", "target_fx_track": 4},
-            ]}
+            ] + self.extra_channels}
         if action == "mixer.getAllTracks":
             return {"success": True, "tracks": [
                 {"index": 0, "name": "Master"}, {"index": 1, "name": "Kick"},
@@ -214,7 +228,17 @@ def tool(tmp_path, monkeypatch, request):
     mcp = RecordingMCP()
     render_tool.register_render_tools(mcp)
     fake.fail_on = fail_on
-    return mcp.tools["fl_render_mix"], fake, renders, flp_path
+    fake.progress = []
+
+    class FakeContext:
+        async def report_progress(self, progress, total=None, message=None):
+            fake.progress.append((progress, total, message))
+
+    def call(**kwargs):
+        return anyio.run(functools.partial(mcp.tools["fl_render_mix"], ctx=FakeContext(),
+                                           **kwargs))
+
+    return call, fake, renders, flp_path
 
 
 def test_render_mix_without_stems(tool):
@@ -262,7 +286,13 @@ def test_render_mix_with_stems(tool):
     assert ("2 channel(s) play straight into Master (or the last insert, 4) and are in "
             "every stem: Pad, Vox") in warnings
     assert "Fade out" not in warnings
-    assert "mask each other" in warnings
+    assert "Kick and Bass both carry" in warnings
+    # the bus contains its sources: never compared with them
+    assert "Bass bus both" not in warnings and "and Bass bus" not in warnings
+    assert "Bass bus) dominates" not in warnings
+    assert [s["inserts"] for s in stems] == [[1, 3], [2, 3], [1, 2, 3]]
+    assert all("also_contains" not in s for s in stems)
+    assert [p[:2] for p in fake.progress] == [(1, 4), (2, 4), (3, 4), (4, 4)]
     assert "channels.getAll" in fake.calls and "mixer.getAllTracks" in fake.calls
 
 
@@ -300,7 +330,7 @@ def test_a_failed_stem_keeps_the_mix_and_the_other_stems(tool):
     result = fl_render_mix(stems=[1, 2, 3])
     assert len(renders) == 4
     assert [s["track"] for s in result["stems"]] == [1, 3]
-    assert "stem 2 (Bass) not rendered: FL Studio wrote no audio file" in " ".join(
+    assert "stem 2 (Bass) not rendered: ToolError: FL Studio wrote no audio file" in " ".join(
         result["stem_warnings"])
     assert result["analysis"]["overall"]["lufs"] is not None
 
@@ -313,3 +343,71 @@ def test_project_that_does_not_round_trip_refuses_stems_only(tool, monkeypatch):
     assert result["stems"] == []
     assert "cannot rewrite byte for byte" in result["stem_warnings"][0]
     assert [s["name"] for s in result["analysis"]["sections"]] == ["Intro", "Drop"]
+
+
+def rewrite_mixer(flp_path: Path, routes: dict[int, list[int]], last: int = LAST) -> None:
+    project = song(8, [(0, "Intro"), (2 * BAR, "Drop")])
+    add_mixer(project, [routes.get(i, []) for i in range(last + 1)])
+    flp_path.write_bytes(project.to_bytes())
+
+
+def test_empty_stem_list_is_no_stems(tool):
+    fl_render_mix, fake, renders, _ = tool
+    result = fl_render_mix(stems=[])
+    assert len(renders) == 1
+    assert "stems" not in result and "stem_warnings" not in result
+    assert "channels.getAll" not in fake.calls
+    assert fake.progress == [(1, 1, "Mix rendered and analysed")]
+
+
+def test_sidechain_destination_is_not_in_the_source_stem(tool):
+    # 1 Kick -> Master, sidechain (level 0) into 2 Bass; 2 Bass -> Master
+    fl_render_mix, fake, renders, flp_path = tool
+    rewrite_mixer(flp_path, {1: [0, 2], 2: [0], 3: [0], 4: [0]})
+    fake.routing = {1: {0: 0.8, 2: 0.0}, 2: {0: 0.8}, 3: {0: 0.8}, 4: {0: 0.8}}
+    result = fl_render_mix(stems=[1, 2])
+    assert enabled(renders[1]["data"]) == [0, 1, 4]
+    # the bass stem keeps the kick (it feeds the bass) but cuts its route to Master
+    assert enabled(renders[2]["data"]) == [0, 1, 2, 4]
+    routes = flp.mixer_routes(Project.parse(renders[2]["data"]))
+    assert routes[1] == {2} and routes[2] == {0}
+    assert [s["inserts"] for s in result["stems"]] == [[1], [1, 2]]
+    assert "mixer.getRouting" in fake.calls
+    assert not any("routing" in n for n in result["notes"])
+
+
+def test_file_routes_when_fl_cannot_report_routing(tool):
+    fl_render_mix, fake, renders, flp_path = tool
+    rewrite_mixer(flp_path, {1: [0, 2], 2: [0], 3: [0], 4: [0]})
+    fake.routing = None
+    result = fl_render_mix(stems=[1])
+    assert enabled(renders[1]["data"]) == [0, 1, 2, 4]
+    assert len(result["stems"]) == 1
+    assert any("follow the routes saved in the file" in n for n in result["notes"])
+
+
+def test_a_kept_bus_with_its_own_channel_is_reported(tool):
+    fl_render_mix, fake, _, _ = tool
+    fake.extra_channels = [{"index": 5, "name": "Bus synth", "type": "plugin",
+                            "target_fx_track": 3}]
+    result = fl_render_mix(stems=[1])
+    assert result["stems"][0]["also_contains"] == [
+        {"track": 3, "name": "Bass bus", "channels": ["Bus synth"]}]
+    assert ("stem 1 (Kick) also contains insert 3 (Bass bus), which it feeds and which "
+            "has its own channel(s): Bus synth") in result["stem_warnings"]
+
+
+def test_any_stem_exception_is_isolated(tool, monkeypatch):
+    fl_render_mix, fake, renders, _ = tool
+    real = mix_analysis.analyze_mix
+
+    def flaky(path, bounds=None):
+        if "stem 1" in str(path):
+            raise RuntimeError("bad wav")
+        return real(path, bounds)
+
+    monkeypatch.setattr(mix_analysis, "analyze_mix", flaky)
+    result = fl_render_mix(stems=[1, 2])
+    assert [s["track"] for s in result["stems"]] == [2]
+    assert "stem 1 (Kick) not rendered: RuntimeError: bad wav" in result["stem_warnings"]
+    assert [p[:2] for p in fake.progress] == [(1, 3), (2, 3), (3, 3)]
