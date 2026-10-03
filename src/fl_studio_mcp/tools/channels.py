@@ -347,7 +347,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         for i, step in enumerate(steps):
             normalized.append(_normalize_step(i, step, ppq))
             if normalized[-1]["step"] in seen:
-                raise ToolError(f"step {i}: step {normalized[-1]['step']} is given twice")
+                raise ToolError(f"list item {i}: step {normalized[-1]['step']} is given twice")
             seen.add(normalized[-1]["step"])
         if pattern is not None and (isinstance(pattern, bool) or pattern < 1):
             raise ToolError(f"pattern numbers start at 1, got {pattern!r}")
@@ -393,8 +393,9 @@ def register_channel_tools(mcp: FastMCP) -> None:
         return result
 
 
-# Controller version whose setSteps writes and verifies the shift safely.
-SHIFT_CONTROLLER_VERSION = project_files.LATEST_CONTROLLER_VERSION
+# Controller version whose setSteps writes and verifies the shift safely
+# (version 6 verifies it more strictly, but 5 is safe).
+SHIFT_CONTROLLER_VERSION = 5
 
 
 def _readable_step(entry: dict, step_ticks: int) -> None:
@@ -417,42 +418,43 @@ def _readable_step(entry: dict, step_ticks: int) -> None:
 def _normalize_step(i: int, step: object, ppq: int) -> dict:
     """One step for channels.setSteps, with FL's raw parameter values."""
     if not isinstance(step, dict):
-        raise ToolError(f"step {i}: expected an object, got {step!r}")
+        raise ToolError(f"list item {i}: expected an object, got {step!r}")
     allowed = {"step", "note", "midi", "velocity", "pan", "shift"}
     unknown = sorted(set(step) - allowed)
     if unknown:
-        raise ToolError(f"step {i}: unknown field(s) {', '.join(unknown)}; allowed: "
+        raise ToolError(f"list item {i}: unknown field(s) {', '.join(unknown)}; allowed: "
                         f"{', '.join(sorted(allowed))}")
     index = step.get("step")
     if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < 512:
-        raise ToolError(f"step {i}: 'step' must be an integer 0-511, got {index!r}")
+        raise ToolError(f"list item {i}: 'step' must be an integer 0-511, got {index!r}")
+    where = f"step {index} (list item {i})"  # the step number, and where it is in the list
     out: dict = {"step": index}
     if "note" in step and "midi" in step:
-        raise ToolError(f"step {i}: give note or midi, not both")
+        raise ToolError(f"{where}: give note or midi, not both")
     if "note" in step:
         try:
             out["pitch"] = note_to_midi(step["note"])
         except ValueError as e:
-            raise ToolError(f"step {i}: {e}") from e
+            raise ToolError(f"{where}: {e}") from e
     elif "midi" in step:
         midi = step["midi"]
         if isinstance(midi, bool) or not isinstance(midi, int) or not 0 <= midi <= 127:
-            raise ToolError(f"step {i}: midi must be 0-127, got {midi!r}")
+            raise ToolError(f"{where}: midi must be 0-127, got {midi!r}")
         out["pitch"] = midi
     if "velocity" in step:
         velocity = step["velocity"]
         if isinstance(velocity, bool) or not isinstance(velocity, int) or not 0 <= velocity <= 127:
-            raise ToolError(f"step {i}: velocity must be an integer 0-127, got {velocity!r}")
+            raise ToolError(f"{where}: velocity must be an integer 0-127, got {velocity!r}")
         out["velocity"] = velocity
     if "pan" in step:
         pan = step["pan"]
         if isinstance(pan, bool) or not isinstance(pan, (int, float)) or not -1 <= pan <= 1:
-            raise ToolError(f"step {i}: pan must be -1..1, got {pan!r}")
+            raise ToolError(f"{where}: pan must be -1..1, got {pan!r}")
         out["pan"] = min(127, int(round((pan + 1) * 64)))
     if "shift" in step:
         shift = step["shift"]
         if isinstance(shift, bool) or not isinstance(shift, (int, float)) or not 0 <= shift < 1:
-            raise ToolError(f"step {i}: shift must be 0 <= shift < 1 (fraction of a step)")
+            raise ToolError(f"{where}: shift must be 0 <= shift < 1 (fraction of a step)")
         step_ticks = max(1, ppq // 4)
         out["shift"] = min(step_ticks - 1, int(round(shift * step_ticks)))
     return out

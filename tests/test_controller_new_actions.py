@@ -95,9 +95,9 @@ def test_save_outside_a_midi_event_is_refused(fl):
     modules["transport"].globalTransport.assert_not_called()
 
 
-def test_controller_version_is_5(fl):
+def test_controller_version_is_6(fl):
     controller, _ = fl
-    assert controller.CONTROLLER_VERSION == 5
+    assert controller.CONTROLLER_VERSION == 6
 
 
 def test_track_volume_in_db_bisects_the_fader(fl):
@@ -191,6 +191,77 @@ def test_set_steps_reports_a_shift_fl_breaks_and_repairs_the_step(fl):
     assert problem["step"] == 2 and "shift" in problem["problem"]
     assert "broken" not in {k[1] for k in params}  # rewritten without the shift
     assert params[(2, 0)] == 41 and params[(2, 1)] == 80
+
+
+def test_a_shift_read_back_in_the_other_form_is_not_accepted(fl):
+    controller, modules = fl
+    _, params = _step_fake(modules)
+    channels = modules["channels"]
+    real_get = channels.getCurrentStepParam.side_effect
+
+    def other_form(ch, step, param, g):  # FL answers absolute for relative and vice versa
+        value = real_get(ch, step, param, g)
+        if param == 7 and (step, 7) in params:
+            return value - step * 24 if value >= step * 24 else value + step * 24
+        return value
+
+    channels.getCurrentStepParam.side_effect = other_form
+    result = controller.dispatch_command("channels.setSteps", {
+        "channel": 1, "steps": [{"step": 2, "velocity": 80, "shift": 12}]})
+    (problem,) = result["mismatched"]
+    assert "did not take shift 12" in problem["problem"]
+
+
+def test_a_relative_shift_is_accepted_only_when_read_back_relative(fl):
+    controller, modules = fl
+    _, params = _step_fake(modules)
+    channels = modules["channels"]
+    real_get = channels.getCurrentStepParam.side_effect
+
+    def relative(ch, step, param, g):  # FL keeps only the offset inside the step
+        value = real_get(ch, step, param, g)
+        return value % 24 if param == 7 and (step, 7) in params else value
+
+    channels.getCurrentStepParam.side_effect = relative
+    result = controller.dispatch_command("channels.setSteps", {
+        "channel": 1, "steps": [{"step": 2, "velocity": 80, "shift": 12}]})
+    assert result["mismatched"] == [] and params[(2, 7)] == 12  # the second (relative) try
+
+
+def test_a_plain_write_that_drops_the_note_data_is_redone_once(fl):
+    controller, modules = fl
+    bits, params = _step_fake(modules)
+    channels = modules["channels"]
+    real_set = channels.setStepParameterByIndex.side_effect
+    writes = []
+
+    def flaky(ch, pat, step, param, value, g):
+        writes.append(param)
+        if len(writes) == 1:
+            params[(step, "broken")] = True  # the first write leaves the step empty
+            return
+        real_set(ch, pat, step, param, value, g)
+
+    channels.setStepParameterByIndex.side_effect = flaky
+    result = controller.dispatch_command("channels.setSteps", {
+        "channel": 1, "clear": False, "steps": [{"step": 3, "pitch": 41, "velocity": 90}]})
+    assert result["mismatched"] == []
+    assert params[(3, 0)] == 41 and params[(3, 1)] == 90
+
+
+def test_a_step_that_keeps_losing_its_note_data_is_reported_not_looped(fl):
+    controller, modules = fl
+    _, params = _step_fake(modules)
+    channels = modules["channels"]
+
+    def always_broken(ch, pat, step, param, value, g):
+        params[(step, "broken")] = True
+
+    channels.setStepParameterByIndex.side_effect = always_broken
+    result = controller.dispatch_command("channels.setSteps", {
+        "channel": 1, "clear": False, "steps": [{"step": 3, "velocity": 90}]})
+    assert "dropped the step's note data" in result["mismatched"][0]["problem"]
+    assert channels.setStepParameterByIndex.call_count == 2  # first write + one rewrite
 
 
 def test_set_steps_checks_every_written_parameter(fl):

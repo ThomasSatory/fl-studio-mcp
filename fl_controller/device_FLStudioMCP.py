@@ -61,7 +61,7 @@ TRIGGER_NOTE = 127
 
 # Bumped whenever an action is added or changes; the MCP server reads it via
 # system.info to detect an outdated script installed in FL Studio.
-CONTROLLER_VERSION = 5
+CONTROLLER_VERSION = 6
 
 # Project loads seen since the script started (OnProjectLoad), so the server
 # can wait for a reload it requested. The instance id changes when FL reloads
@@ -302,8 +302,11 @@ def _pattern_index_error(patterns, index: int) -> dict | None:
     return None
 
 
-# patterns.getPatternLength counts step-sequencer steps (16ths), not beats as
-# the API docs say: verified live, a 2-bar pattern reports 32.
+# patterns.getPatternLength counts step-sequencer steps, not beats as the API
+# docs say (verified live: a 2-bar 4/4 pattern reports 32). A step is a 16th
+# with FL's default of 4 steps per beat; a project set to another "steps per
+# beat" (Project > Time settings) would make this ratio wrong, and the script
+# API does not report that setting.
 STEPS_PER_BEAT = 4
 
 
@@ -1871,21 +1874,28 @@ def _select_pattern_param(params: dict):
     return int(pattern), None
 
 
-def _step_problems(channel: int, step: int, s: dict, step_ticks: int) -> list:
-    """What differs between step `s` as asked and as FL reads it back ([] if nothing)."""
+def _dropped_note_data(channel: int, step: int) -> bool:
+    """FL left the step without note data: its parameters read -1."""
+    return channels.getCurrentStepParam(channel, step, 0, True) < 0
+
+
+def _step_problems(channel: int, step: int, s: dict, written_shift=None) -> list:
+    """What differs between step `s` as asked and as FL reads it back ([] if nothing).
+
+    The shift is compared with `written_shift`, the exact raw value just
+    written (absolute or relative form), and nothing else.
+    """
     if not channels.getGridBit(channel, step, True):
         return ["step is off"]
     problems = []
-    if channels.getCurrentStepParam(channel, step, 0, True) < 0:
+    if _dropped_note_data(channel, step):
         problems.append("FL dropped the step's note data (its parameters read -1)")
     for key, param_id in _STEP_PARAMS.items():
         if key not in s:
             continue
         got = channels.getCurrentStepParam(channel, step, param_id, True)
-        want = int(s[key])
-        # FL reads the shift back as the step's absolute tick position.
-        ok = got in (want, step * step_ticks + want) if key == "shift" else got == want
-        if not ok:
+        want = int(written_shift if key == "shift" and written_shift is not None else s[key])
+        if got != want:
             problems.append("%s %s != %s" % (key, got, want))
     return problems
 
@@ -1896,8 +1906,10 @@ def _write_step(channel: int, pattern: int, step: int, s: dict, step_ticks: int)
     The shift goes last. FL reports it as an absolute tick position, and a
     relative value (as the API docs describe it) left the step without note
     data live: the absolute form is tried first, then (on a freshly rewritten
-    step) the relative one; when neither reads back, the step is rewritten
-    without shift and the problem is reported.
+    step) the relative one. Each attempt only counts when FL reads back the
+    exact value just written. When neither does, the step is rewritten
+    without shift and the problem is reported. A step left without note data
+    by the plain write is rewritten fresh once.
     """
     plain = {k: v for k, v in s.items() if k != "shift"}
 
@@ -1911,17 +1923,19 @@ def _write_step(channel: int, pattern: int, step: int, s: dict, step_ticks: int)
                                                  int(s[key]), True)
 
     write_plain(fresh=False)
+    if _dropped_note_data(channel, step):
+        write_plain()  # one fresh rewrite, no more
     if "shift" not in s:
-        return _step_problems(channel, step, s, step_ticks)
+        return _step_problems(channel, step, s)
     shift = int(s["shift"])
     for value in (step * step_ticks + shift, shift):
         channels.setStepParameterByIndex(channel, pattern, step, _STEP_PARAMS["shift"],
                                          value, True)
-        if not _step_problems(channel, step, s, step_ticks):
+        if not _step_problems(channel, step, s, written_shift=value):
             return []
         write_plain()
     return ["FL Studio did not take shift %d ticks; the step was rewritten without it"
-            % shift] + _step_problems(channel, step, plain, step_ticks)
+            % shift] + _step_problems(channel, step, plain)
 
 
 def handle_channels_set_steps(params: dict) -> dict:
