@@ -242,42 +242,95 @@ def _db(value: float) -> float | None:
     return round(20 * math.log10(value), 1) if value > 0 else None
 
 
-def estimate_pitch(signal: list[float], rate: int) -> float | None:
-    """Fundamental frequency by autocorrelation on a stable window (None if unclear)."""
-    if len(signal) < rate // 10:
-        return None
-    step = max(1, rate // 11025)
-    start = min(len(signal) // 4, int(0.05 * rate))  # skip the attack
-    window = signal[start:start + int(0.25 * rate)][::step]
-    sr = rate / step
+PITCH_SKIP_SECONDS = 0.12  # the attack of an 808 or kick glides down in pitch
+PITCH_WINDOW_SECONDS = 0.2  # five periods of 25 Hz
+PITCH_HOP_SECONDS = 0.1
+PITCH_MAX_WINDOWS = 6
+
+
+def _window_pitch(window, sr: float) -> float | None:
+    """Fundamental of one window by autocorrelation (None if unclear).
+
+    The first strong peak (>= 85 % of the strongest) is taken rather than the
+    strongest: a sub-harmonic peak can be as high as the true one and would
+    give the octave below.
+    """
+    import numpy as np
+
     n = len(window)
-    if n < 256:
-        return None
-    mean = sum(window) / n
-    window = [v - mean for v in window]
-    energy = sum(v * v for v in window)
-    if energy <= 1e-9:
+    window = window - window.mean()
+    energy = float(np.dot(window, window))
+    if n < 256 or energy <= 1e-9:
         return None
     min_lag, max_lag = max(2, int(sr / 1000)), min(int(sr / 25), n // 2)
-    corr = [sum(window[i] * window[i + lag] for i in range(0, n - lag, 2)) / (energy / 2)
-            for lag in range(max_lag)]
-    # Skip the main lobe around lag 0, then take the strongest peak: taking
-    # the global maximum instead would lock onto a tiny lag for bass sounds.
+    if max_lag <= min_lag + 2:
+        return None
+    size = 1 << (2 * n - 1).bit_length()
+    spectrum = np.fft.rfft(window, size)
+    full = np.fft.irfft(spectrum * np.conj(spectrum), size)[:max_lag + 1]
+    # Unbiased: each lag is normalised by the overlap it was computed on.
+    corr = full / energy * n / (n - np.arange(max_lag + 1))
     lag = min_lag
     while lag < max_lag and corr[lag] > 0:
-        lag += 1
+        lag += 1  # skip the main lobe around lag 0
     if lag >= max_lag:
         return None
-    best_lag = max(range(lag, max_lag), key=lambda k: corr[k])
-    if corr[best_lag] < 0.3:
+    peaks = [k for k in range(lag + 1, max_lag)
+             if corr[k] >= corr[k - 1] and corr[k] > corr[k + 1]]
+    if not peaks:
         return None
-    # Parabolic interpolation for sub-sample precision.
-    if 0 < best_lag < max_lag - 1:
-        a, b, c = corr[best_lag - 1], corr[best_lag], corr[best_lag + 1]
-        denom = a - 2 * b + c
-        if denom:
-            return sr / (best_lag + 0.5 * (a - c) / denom)
-    return sr / best_lag
+    best = max(corr[k] for k in peaks)
+    if best < 0.3:
+        return None
+    chosen = next(k for k in peaks if corr[k] >= 0.85 * best)
+    a, b, c = corr[chosen - 1], corr[chosen], corr[chosen + 1]
+    denom = a - 2 * b + c
+    offset = 0.5 * (a - c) / denom if denom else 0.0
+    return sr / (chosen + offset)
+
+
+def estimate_pitch(signal: list[float], rate: int) -> float | None:
+    """Fundamental frequency of the sustain, or None when it is unclear.
+
+    The attack is skipped (from 120 ms, or after the peak when it comes later):
+    808s and kicks start with a pitch glide that reads up to a semitone sharp.
+    Several windows of the sustain are measured and the median is kept, so one
+    window caught in a glide or in the noise floor does not decide.
+    """
+    import numpy as np
+
+    data = np.asarray(signal, dtype=float)
+    if len(data) < rate // 10:
+        return None
+    step = max(1, rate // 11025)
+    data = data[::step]
+    sr = rate / step
+    window = int(PITCH_WINDOW_SECONDS * sr)
+    hop = int(PITCH_HOP_SECONDS * sr)
+    peak_at = int(np.argmax(np.abs(data)))
+    start = max(int(PITCH_SKIP_SECONDS * sr), peak_at + int(0.02 * sr))
+    # A short sound: keep as much of the skip as still leaves one window.
+    start = max(0, min(start, len(data) - window))
+    if len(data) - start < 256:
+        return None
+    reference = None
+    found = []
+    for i in range(PITCH_MAX_WINDOWS):
+        begin = start + i * hop
+        part = data[begin:begin + window]
+        if len(part) < min(window, 256) or (i and len(part) < window // 2):
+            break
+        level = float(np.sqrt(np.mean(part * part)))
+        if reference is None:
+            reference = level
+        elif level < reference * 0.05:  # -26 dB: the tail has faded into noise
+            break
+        freq = _window_pitch(part, sr)
+        if freq:
+            found.append(freq)
+    if not found:
+        return None
+    return float(2 ** np.median(np.log2(found)))
 
 
 def _band_levels(signal: list[float], rate: int) -> dict:

@@ -35,6 +35,39 @@ def test_analyze_reports_level_and_pitch(tmp_path):
     assert result["spectrum"]["low_pct"] > 80  # one-pole filters: gentle slopes
 
 
+def write_808(path, rate=44100, seconds=1.2):
+    """808-like tone: pitch glides from 2x down to A1 over 80 ms, then holds and decays."""
+    frames, phase = [], 0.0
+    for i in range(int(seconds * rate)):
+        t = i / rate
+        freq = 55.0 * (2 ** (1 - t / 0.08)) if t < 0.08 else 55.0
+        phase += 2 * math.pi * freq / rate
+        amplitude = 0.9 * math.exp(-t / 0.6) * min(1.0, t / 0.002)
+        frames.append(struct.pack("<h", int(32767 * amplitude * math.sin(phase))))
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"".join(frames))
+
+
+def test_analyze_808_skips_the_pitch_glide(tmp_path):
+    path = tmp_path / "808.wav"
+    write_808(path)
+    pitch = samples.analyze(path)["pitch"]
+    assert pitch["note"] == "A1"
+    assert abs(pitch["cents_off"]) <= 10  # the attack alone read +22 cents
+
+
+def test_estimate_pitch_prefers_the_fundamental_over_a_subharmonic():
+    rate = 11025
+    # A strong 2nd harmonic: the autocorrelation peak at twice the period is as high.
+    signal = [math.sin(2 * math.pi * 55 * i / rate) + 0.8 * math.sin(2 * math.pi * 110 * i / rate)
+              for i in range(rate)]
+    freq = samples.estimate_pitch(signal, rate)
+    assert abs(12 * math.log2(freq / 55)) < 0.2
+
+
 def test_analyze_flags_clipping(tmp_path):
     path = tmp_path / "hot.wav"
     write_sine(path, 440.0, amplitude=1.0)
